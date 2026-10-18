@@ -48,7 +48,7 @@ typedef struct {
 
 typedef struct {
     int app_id;
-    apps_fragment_t *controller;
+    bool fav;
     const appitem_styles_t *styles;
     lv_obj_t *play_indicator;
     lv_obj_t *title;

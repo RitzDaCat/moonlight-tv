@@ -2,6 +2,7 @@
 #include "app_launch.h"
 
 #include "add.dialog.h"
+#include "split.controller.h"
 #include "apps.controller.h"
 #include "launcher.controller.h"
 #include "pair.dialog.h"
@@ -53,6 +54,10 @@ static void cb_detail_cancel(lv_event_t *event);
 static void open_manual_add(lv_event_t *event);
 
 static void open_settings(lv_event_t *event);
+
+#if FEATURE_SPLIT_SCREEN
+static void open_split_screen(lv_event_t *event);
+#endif
 
 static void open_help(lv_event_t *event);
 
@@ -165,6 +170,9 @@ static void launcher_view_init(lv_fragment_t *self, lv_obj_t *view) {
     lv_obj_add_event_cb(fragment->pclist, cb_pc_longpress, LV_EVENT_LONG_PRESSED, fragment);
     lv_obj_add_event_cb(fragment->add_btn, open_manual_add, LV_EVENT_CLICKED, fragment);
     lv_obj_add_event_cb(fragment->pref_btn, open_settings, LV_EVENT_CLICKED, fragment);
+#if FEATURE_SPLIT_SCREEN
+    lv_obj_add_event_cb(fragment->split_btn, open_split_screen, LV_EVENT_CLICKED, fragment);
+#endif
     lv_obj_add_event_cb(fragment->help_btn, open_help, LV_EVENT_CLICKED, fragment);
     lv_obj_add_event_cb(fragment->quit_btn, app_quit_confirm, LV_EVENT_CLICKED, fragment);
 
@@ -462,6 +470,15 @@ static void open_settings(lv_event_t *event) {
     lv_obj_t *const *container = lv_fragment_get_container(lv_fragment_manager_get_top(self->global->ui.fm));
     lv_fragment_manager_push(self->global->ui.fm, fragment, container);
 }
+
+#if FEATURE_SPLIT_SCREEN
+static void open_split_screen(lv_event_t *event) {
+    launcher_fragment_t *self = lv_event_get_user_data(event);
+    lv_fragment_t *fragment = lv_fragment_create(&split_controller_class, self->global);
+    lv_obj_t *const *container = lv_fragment_get_container(lv_fragment_manager_get_top(self->global->ui.fm));
+    lv_fragment_manager_push(self->global->ui.fm, fragment, container);
+}
+#endif
 
 static void show_decoder_error() {
     static const char *btn_txts[] = {translatable("OK"), ""};

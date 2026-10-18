@@ -9,7 +9,7 @@
 
 typedef struct app_fonts_t app_fonts_t;
 
-lv_obj_t *appitem_view(apps_fragment_t *controller, lv_obj_t *parent);
+lv_obj_t *appitem_view(appitem_styles_t *styles, lv_coord_t width, lv_coord_t height, lv_obj_t *parent);
 
 void appitem_style_init(appitem_styles_t *style);
 

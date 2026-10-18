@@ -12,18 +12,17 @@ static void appitem_selected(lv_event_t *e);
 
 static void appitem_deselected(lv_event_t *e);
 
-lv_obj_t *appitem_view(apps_fragment_t *controller, lv_obj_t *parent) {
-    appitem_styles_t *styles = &controller->appitem_style;
+lv_obj_t *appitem_view(appitem_styles_t *styles, lv_coord_t width, lv_coord_t height, lv_obj_t *parent) {
     lv_obj_t *item = lv_img_create(parent);
     lv_obj_add_flag(item, LV_OBJ_FLAG_EVENT_BUBBLE | LV_OBJ_FLAG_CLICKABLE | LV_OBJ_FLAG_SCROLL_ON_FOCUS);
     lv_obj_clear_flag(item, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_add_style(item, &styles->cover, 0);
-    lv_obj_set_size(item, controller->col_width, controller->col_height);
+    lv_obj_set_size(item, width, height);
 
     lv_obj_set_style_outline_opa(item, LV_OPA_COVER, LV_STATE_FOCUS_KEY);
 
-    lv_obj_set_style_transform_pivot_x(item, controller->col_width / 2, 0);
-    lv_obj_set_style_transform_pivot_y(item, controller->col_height / 2, 0);
+    lv_obj_set_style_transform_pivot_x(item, width / 2, 0);
+    lv_obj_set_style_transform_pivot_y(item, height / 2, 0);
 
     lv_obj_set_style_transform_zoom(item, 256 * 99 / 100, LV_STATE_PRESSED);
     lv_obj_set_style_transform_zoom(item, 256 * 102 / 100, LV_STATE_FOCUS_KEY);
@@ -51,7 +50,6 @@ lv_obj_t *appitem_view(apps_fragment_t *controller, lv_obj_t *parent) {
     appitem_viewholder_t *holder = (appitem_viewholder_t *) malloc(sizeof(appitem_viewholder_t));
     memset(holder, 0, sizeof(appitem_viewholder_t));
 
-    holder->controller = controller;
     holder->styles = styles;
     holder->play_indicator = play_indicator;
     holder->title = title;
@@ -124,8 +122,7 @@ static void appitem_draw_decor(lv_event_t *e) {
     appitem_styles_t *styles = lv_event_get_user_data(e);
     lv_obj_t *target = lv_event_get_target(e);
     appitem_viewholder_t *holder = lv_obj_get_user_data(target);
-    const apploader_item_t *item = apploader_list_item_by_id(holder->controller->apploader_apps, holder->app_id);
-    if (item == NULL || !item->fav) {
+    if (!holder->fav) {
         return;
     }
     lv_area_t coords;

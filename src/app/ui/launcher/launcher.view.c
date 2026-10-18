@@ -104,6 +104,15 @@ lv_obj_t *launcher_win_create(lv_fragment_t *self, lv_obj_t *parent) {
     lv_obj_set_flex_grow(pclist, 1);
 
     // Use list button for normal container
+#if FEATURE_SPLIT_SCREEN
+    lv_obj_t *split_btn = lv_list_add_btn(nav, MAT_SYMBOL_SPORTS_ESPORTS, locstr("Split screen"));
+    lv_obj_add_style(split_btn, &controller->nav_menu_style, 0);
+    lv_btn_set_icon_font(split_btn, lv_theme_moonlight_get_iconfont_small(nav));
+    lv_btn_set_text_font(split_btn, lv_theme_get_font_small(nav));
+    lv_obj_add_flag(split_btn, LV_OBJ_FLAG_EVENT_BUBBLE);
+    controller->split_btn = split_btn;
+#endif
+
     lv_obj_t *add_btn = lv_list_add_btn(nav, MAT_SYMBOL_ADD_TO_QUEUE, locstr("Add computer"));
     lv_obj_add_style(add_btn, &controller->nav_menu_style, 0);
     lv_btn_set_icon_font(add_btn, lv_theme_moonlight_get_iconfont_small(nav));

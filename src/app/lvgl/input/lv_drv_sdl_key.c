@@ -8,6 +8,8 @@
 #include "util/user_event.h"
 #include "lv_drv_sdl_key.h"
 #include "stream/session_events.h"
+#include "input/input_gamepad.h"
+#include "ui/launcher/split.controller.h"
 
 #if TARGET_WEBOS
 
@@ -88,6 +90,9 @@ static void sdl_input_read(lv_indev_drv_t *drv, lv_indev_data_t *data) {
         if (app->session != NULL && session_handle_input_event(app->session, &e)) {
             state->state = LV_INDEV_STATE_RELEASED;
         } else {
+#if FEATURE_SPLIT_SCREEN
+            split_controller_route_input(-1);
+#endif
             if (read_keyboard(input, &e.key, state)) {
                 ui_set_input_mode(input, UI_INPUT_MODE_KEY);
             }
@@ -97,6 +102,13 @@ static void sdl_input_read(lv_indev_drv_t *drv, lv_indev_data_t *data) {
         if (app->session != NULL && session_handle_input_event(app->session, &e)) {
             state->state = LV_INDEV_STATE_RELEASED;
         } else {
+#if FEATURE_SPLIT_SCREEN
+            if (e.type == SDL_CONTROLLERBUTTONDOWN) {
+                const app_gamepad_state_t *gamepad = app_input_gamepad_state_by_instance_id(&app->input,
+                                                                                            e.cbutton.which);
+                split_controller_route_input(gamepad != NULL ? gamepad->gs_id : 0);
+            }
+#endif
             if (read_event(&e, state)) {
                 ui_set_input_mode(input, UI_INPUT_MODE_GAMEPAD);
             }

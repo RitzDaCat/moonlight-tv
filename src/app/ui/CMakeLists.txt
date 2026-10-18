@@ -5,7 +5,7 @@ target_sources(moonlight-lib PRIVATE
         launcher/launcher.view.c
         launcher/launcher.controller.c
         launcher/apps.controller.c
-        launcher/split_launch.c
+        launcher/split.controller.c
         launcher/add.dialog.c
         launcher/pair.dialog.c
         launcher/appitem.view.c
