@@ -75,7 +75,7 @@ typedef struct app_settings_t app_settings_t;
 typedef struct session_t session_t;
 
 session_t *session_create(app_t *app, const app_settings_t *config, const SERVER_DATA *server, const APP_LIST *gs_app,
-                          int slot);
+                          int slot, bool split);
 
 void session_destroy(session_t *session);
 
@@ -96,6 +96,9 @@ void session_screen_keyboard_closed(session_t *session);
 bool session_accepting_input(session_t *session);
 
 void streaming_display_size(session_t *session, short width, short height);
+
+/* Called by the video decoder callback once the player's video is open */
+void session_video_opened(session_t *session);
 
 void streaming_enter_fullscreen(session_t *session);
 

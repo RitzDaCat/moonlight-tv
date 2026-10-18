@@ -128,7 +128,8 @@ static void constructor(lv_fragment_t *self, void *args) {
 
     const streaming_scene_arg_t *arg = (streaming_scene_arg_t *) args;
     controller->global = arg->global;
-    app_session_begin(arg->global, &arg->uuid, &arg->app);
+    app_session_begin(arg->global, &arg->uuid, &arg->app, arg->split ? &arg->split_uuid : NULL,
+                      arg->split ? &arg->split_app : NULL);
 }
 
 static void controller_dtor(lv_fragment_t *self) {
@@ -257,12 +258,12 @@ static void on_obj_deleted(lv_fragment_t *self, lv_obj_t *view) {
 
 static void exit_streaming(lv_event_t *event) {
     streaming_controller_t *self = lv_event_get_user_data(event);
-    session_interrupt(self->global->session, true, STREAMING_INTERRUPT_USER);
+    app_session_interrupt(self->global, true, STREAMING_INTERRUPT_USER);
 }
 
 static void suspend_streaming(lv_event_t *event) {
     streaming_controller_t *self = lv_event_get_user_data(event);
-    session_interrupt(self->global->session, false, STREAMING_INTERRUPT_USER);
+    app_session_interrupt(self->global, false, STREAMING_INTERRUPT_USER);
 }
 
 static void open_keyboard(lv_event_t *event) {

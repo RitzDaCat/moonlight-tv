@@ -13,6 +13,9 @@
 #include "stream/input/session_virt_mouse.h"
 #include "logging.h"
 
+#define HOST_ID(input, gamepad) session_host_gamepad_id((input)->session, (gamepad)->gs_id)
+#define HOST_MASK(input) session_host_gamepad_mask((input)->session, (input)->input->activeGamepadMask)
+
 #define QUIT_BUTTONS (PLAY_FLAG | BACK_FLAG | LB_FLAG | RB_FLAG)
 #define GAMEPAD_COMBO_VMOUSE (LB_FLAG | RS_CLK_FLAG)
 
@@ -125,7 +128,7 @@ void stream_input_touchpad_mouse_deinit(stream_input_t *input) {
 
 void stream_input_handle_cbutton(stream_input_t *input, const SDL_ControllerButtonEvent *event) {
     app_gamepad_state_t *gamepad = app_input_gamepad_state_by_instance_id(input->input, event->which);
-    if (gamepad == NULL) {
+    if (gamepad == NULL || !session_owns_gamepad(input->session, gamepad->gs_id)) {
         return;
     }
     int button = 0;
@@ -263,14 +266,14 @@ void stream_input_handle_cbutton(stream_input_t *input, const SDL_ControllerButt
     if (input->view_only) {
         return;
     }
-    input->session->mlc->LiSendMultiControllerEvent(gamepad->gs_id, input->input->activeGamepadMask, gamepad->buttons, gamepad->leftTrigger,
+    input->session->mlc->LiSendMultiControllerEvent(HOST_ID(input, gamepad), HOST_MASK(input), gamepad->buttons, gamepad->leftTrigger,
                                gamepad->rightTrigger, gamepad->leftStickX, gamepad->leftStickY, gamepad->rightStickX,
                                gamepad->rightStickY);
 }
 
 void stream_input_handle_caxis(stream_input_t *input, const SDL_ControllerAxisEvent *event) {
     app_gamepad_state_t *gamepad = app_input_gamepad_state_by_instance_id(input->input, event->which);
-    if (gamepad == NULL) {
+    if (gamepad == NULL || !session_owns_gamepad(input->session, gamepad->gs_id)) {
         return;
     }
     switch (event->axis) {
@@ -316,10 +319,10 @@ void stream_input_handle_caxis(stream_input_t *input, const SDL_ControllerAxisEv
     if (vmouse_intercepted(input, gamepad)) {
         vmouse_set_vector(&input->vmouse, gamepad->rightStickX, gamepad->rightStickY);
         vmouse_set_trigger(&input->vmouse, gamepad->leftTrigger, gamepad->rightTrigger);
-        input->session->mlc->LiSendMultiControllerEvent(gamepad->gs_id, input->input->activeGamepadMask, gamepad->buttons, 0, 0,
+        input->session->mlc->LiSendMultiControllerEvent(HOST_ID(input, gamepad), HOST_MASK(input), gamepad->buttons, 0, 0,
                                    gamepad->leftStickX, gamepad->leftStickY, 0, 0);
     } else {
-        input->session->mlc->LiSendMultiControllerEvent(gamepad->gs_id, input->input->activeGamepadMask, gamepad->buttons,
+        input->session->mlc->LiSendMultiControllerEvent(HOST_ID(input, gamepad), HOST_MASK(input), gamepad->buttons,
                                    gamepad->leftTrigger,
                                    gamepad->rightTrigger, gamepad->leftStickX, gamepad->leftStickY,
                                    gamepad->rightStickX, gamepad->rightStickY);
@@ -328,7 +331,7 @@ void stream_input_handle_caxis(stream_input_t *input, const SDL_ControllerAxisEv
 
 void stream_input_handle_csensor(stream_input_t *input, const SDL_ControllerSensorEvent *event) {
     app_gamepad_state_t *gamepad = app_input_gamepad_state_by_instance_id(input->input, event->which);
-    if (gamepad == NULL) {
+    if (gamepad == NULL || !session_owns_gamepad(input->session, gamepad->gs_id)) {
         return;
     }
     if (input->view_only) {
@@ -339,7 +342,7 @@ void stream_input_handle_csensor(stream_input_t *input, const SDL_ControllerSens
             if (sensor_state_needs_update(&gamepad->accelState, event->timestamp, event->data)) {
                 gamepad->accelState.lastTimestamp = event->timestamp;
                 memcpy(gamepad->accelState.data, event->data, sizeof(gamepad->accelState.data));
-                input->session->mlc->LiSendControllerMotionEvent(gamepad->gs_id, LI_MOTION_TYPE_ACCEL, event->data[0], event->data[1],
+                input->session->mlc->LiSendControllerMotionEvent(HOST_ID(input, gamepad), LI_MOTION_TYPE_ACCEL, event->data[0], event->data[1],
                                             event->data[2]);
             }
             break;
@@ -349,7 +352,7 @@ void stream_input_handle_csensor(stream_input_t *input, const SDL_ControllerSens
                 gamepad->gyroState.lastTimestamp = event->timestamp;
                 memcpy(gamepad->gyroState.data, event->data, sizeof(gamepad->gyroState.data));
                 // Convert rad/s to deg/s
-                input->session->mlc->LiSendControllerMotionEvent(gamepad->gs_id, LI_MOTION_TYPE_GYRO,
+                input->session->mlc->LiSendControllerMotionEvent(HOST_ID(input, gamepad), LI_MOTION_TYPE_GYRO,
                                             event->data[0] * 57.2957795f,
                                             event->data[1] * 57.2957795f,
                                             event->data[2] * 57.2957795f);
@@ -368,7 +371,7 @@ void stream_input_handle_ctouchpad(stream_input_t *input, const SDL_ControllerTo
     }
 
     app_gamepad_state_t *gamepad = app_input_gamepad_state_by_instance_id(input->input, event->which);
-    if (gamepad == NULL) {
+    if (gamepad == NULL || !session_owns_gamepad(input->session, gamepad->gs_id)) {
         return;
     }
 
@@ -383,7 +386,7 @@ void stream_input_handle_ctouchpad(stream_input_t *input, const SDL_ControllerTo
                 event->type == SDL_CONTROLLERTOUCHPADDOWN ? LI_TOUCH_EVENT_DOWN :
                 event->type == SDL_CONTROLLERTOUCHPADUP ? LI_TOUCH_EVENT_UP :
                                                           LI_TOUCH_EVENT_MOVE;
-        input->session->mlc->LiSendControllerTouchEvent(gamepad->gs_id, native_event_type, event->finger,
+        input->session->mlc->LiSendControllerTouchEvent(HOST_ID(input, gamepad), native_event_type, event->finger,
                                    event->x, event->y, event->pressure);
         return;
     }
@@ -612,7 +615,7 @@ void stream_input_update_touchpad_tap_hold(stream_input_t *input) {
 
 void stream_input_handle_cdevice(stream_input_t *input, const SDL_ControllerDeviceEvent *event) {
     app_gamepad_state_t *gamepad = app_input_gamepad_state_by_instance_id(input->input, event->which);
-    if (gamepad == NULL) {
+    if (gamepad == NULL || !session_owns_gamepad(input->session, gamepad->gs_id)) {
         return;
     }
     if (input->view_only) {
@@ -622,6 +625,9 @@ void stream_input_handle_cdevice(stream_input_t *input, const SDL_ControllerDevi
 }
 
 void stream_input_send_gamepad_arrive(const stream_input_t *input, app_gamepad_state_t *gamepad) {
+    if (!session_owns_gamepad(input->session, gamepad->gs_id)) {
+        return;
+    }
     uint8_t type = LI_CTYPE_XBOX;
     uint16_t capabilities = LI_CCAP_ANALOG_TRIGGERS;
     commons_log_info("Input", "Controller %d arrived. Name: %s", gamepad->gs_id,
@@ -685,7 +691,7 @@ void stream_input_send_gamepad_arrive(const stream_input_t *input, app_gamepad_s
         commons_log_info("Input", "  controller capability: RGB LED");
     }
 #endif
-    input->session->mlc->LiSendControllerArrivalEvent(gamepad->gs_id, input->input->activeGamepadMask, type,
+    input->session->mlc->LiSendControllerArrivalEvent(HOST_ID(input, gamepad), HOST_MASK(input), type,
                                  0xFFFFFFFF, capabilities);
 }
 
@@ -829,6 +835,9 @@ static float touchpad_aspect(const app_gamepad_state_t *gamepad) {
 }
 
 static void release_buttons(stream_input_t *input, app_gamepad_state_t *gamepad) {
+    if (!session_owns_gamepad(input->session, gamepad->gs_id)) {
+        return;
+    }
     gamepad->buttons = 0;
     gamepad->leftTrigger = 0;
     gamepad->rightTrigger = 0;
@@ -836,7 +845,7 @@ static void release_buttons(stream_input_t *input, app_gamepad_state_t *gamepad)
     gamepad->leftStickY = 0;
     gamepad->rightStickX = 0;
     gamepad->rightStickY = 0;
-    input->session->mlc->LiSendMultiControllerEvent(gamepad->gs_id, input->input->activeGamepadMask, gamepad->buttons, gamepad->leftTrigger,
+    input->session->mlc->LiSendMultiControllerEvent(HOST_ID(input, gamepad), HOST_MASK(input), gamepad->buttons, gamepad->leftTrigger,
                                gamepad->rightTrigger, gamepad->leftStickX, gamepad->leftStickY, gamepad->rightStickX,
                                gamepad->rightStickY);
 }

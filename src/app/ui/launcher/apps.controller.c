@@ -20,6 +20,7 @@
 #include "util/user_event.h"
 #include "util/i18n.h"
 #include "pair.dialog.h"
+#include "split_launch.h"
 #include "ui/common/progress_dialog.h"
 
 typedef void (*action_cb_t)(apps_fragment_t *controller, lv_obj_t *buttons, uint16_t index);
@@ -725,6 +726,11 @@ static void open_context_menu(apps_fragment_t *fragment, appitem_viewholder_t *h
         lv_obj_add_flag(start_btn, LV_OBJ_FLAG_EVENT_BUBBLE);
         lv_obj_set_user_data(start_btn, launcher_launch_game);
     }
+#if FEATURE_SPLIT_SCREEN
+    if (!currentId) {
+        split_launch_add_menu_items(content, &fragment->uuid);
+    }
+#endif
 
     if (currentId) {
         lv_obj_t *quit_btn = lv_list_add_btn(content, NULL, locstr("Stop streaming"));
@@ -763,6 +769,12 @@ static void context_menu_click_cb(lv_event_t *e) {
     appitem_viewholder_t *holder = lv_obj_get_user_data(mbox);
     const apploader_item_t *app = apploader_list_item_by_id(self->apploader_apps, holder->app_id);
     assert(app != NULL);
+#if FEATURE_SPLIT_SCREEN
+    if (split_launch_handle_click(target, self->global, &self->uuid, &app->base)) {
+        lv_msgbox_close_async(mbox);
+        return;
+    }
+#endif
     if (lv_obj_get_user_data(target) == launcher_quit_game) {
         launcher_quit_game(self);
     } else if (lv_obj_get_user_data(target) == launcher_launch_game) {

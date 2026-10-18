@@ -128,6 +128,7 @@ int vdec_delegate_setup(int videoFormat, int width, int height, int redrawRate, 
 
     switch (SS4S_PlayerVideoOpen(player, &info)) {
         case SS4S_VIDEO_OPEN_OK: {
+            session_video_opened(session);
             return 0;
         }
         case SS4S_VIDEO_OPEN_UNSUPPORTED_CODEC:

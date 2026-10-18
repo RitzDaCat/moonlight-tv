@@ -42,6 +42,10 @@ typedef struct {
     app_t *global;
     uuidstr_t uuid;
     APP_LIST app;
+    /* Split screen: second host on the right half */
+    bool split;
+    uuidstr_t split_uuid;
+    APP_LIST split_app;
 } streaming_scene_arg_t;
 
 extern const lv_fragment_class_t streaming_controller_class;

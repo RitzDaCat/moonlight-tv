@@ -31,14 +31,22 @@ static void session_config_init(app_t *app, session_config_t *config, const SERV
 
 static void populate_hdr_info_vui(SS4S_VideoHDRInfo *info, const STREAM_CONFIGURATION *config);
 
+static void session_config_split(app_t *app, session_config_t *config);
+
+static void session_split_area(const session_t *session, SS4S_VideoRect *area);
+
 session_t *session_create(app_t *app, const CONFIGURATION *config, const SERVER_DATA *server, const APP_LIST *gs_app,
-                          int slot) {
+                          int slot, bool split) {
     session_t *session = malloc(sizeof(session_t));
     SDL_memset(session, 0, sizeof(session_t));
     session_config_init(app, &session->config, server, config);
     session->app = app;
     session->slot = slot;
     session->mlc = &mlc_slots[slot];
+    session->split = split;
+    if (split) {
+        session_config_split(app, &session->config);
+    }
     session->display_width = app->ui.width;
     session->display_height = app->ui.height;
     session->audio_cap = app->ss4s.audio_cap;
@@ -169,8 +177,16 @@ void streaming_display_size(session_t *session, short width, short height) {
     session->display_height = height;
 }
 
+void session_video_opened(session_t *session) {
+    if (session->split) {
+        SS4S_VideoRect area;
+        session_split_area(session, &area);
+        SS4S_PlayerVideoSetDisplayArea(session->player, NULL, &area);
+    }
+}
+
 void streaming_enter_fullscreen(session_t *session) {
-    if (!session->player) {
+    if (!session->player || session->split) {
         return;
     }
     if ((session->video_cap.transform & SS4S_VIDEO_CAP_TRANSFORM_UI_COMPOSITING) == 0) {
@@ -180,6 +196,10 @@ void streaming_enter_fullscreen(session_t *session) {
 
 void streaming_enter_overlay(session_t *session, int x, int y, int w, int h) {
     app_set_mouse_grab(&session->app->input, false);
+    if (session->split) {
+        // Both halves stay in place under the overlay
+        return;
+    }
     SS4S_VideoRect dst = {x, y, w, h};
     if ((session->video_cap.transform & SS4S_VIDEO_CAP_TRANSFORM_UI_COMPOSITING) == 0) {
         SS4S_PlayerVideoSetDisplayArea(session->player, NULL, &dst);
@@ -356,3 +376,34 @@ static void populate_hdr_info_vui(SS4S_VideoHDRInfo *info, const STREAM_CONFIGUR
     info->videoFullRange = config->colorRange == COLOR_RANGE_FULL;
 }
 
+
+/* Each half of the screen shows one 1080p stream: a 4K panel gives it native pixels, and two 4K decodes would
+ * exceed what the TV can do */
+static void session_config_split(app_t *app, session_config_t *config) {
+    config->stream.width = 1920;
+    config->stream.height = 1080;
+    if (config->stream.fps > 60) {
+        config->stream.fps = 60;
+    }
+    SS4S_VideoCapabilities video_cap = app->ss4s.video_cap;
+    config->stream.bitrate = settings_optimal_bitrate(&video_cap, config->stream.width, config->stream.height,
+                                                      config->stream.fps);
+    if (video_cap.maxBitrate && config->stream.bitrate > video_cap.maxBitrate) {
+        config->stream.bitrate = (int) video_cap.maxBitrate;
+    }
+    config->sops = false;
+}
+
+/* Slot 0 gets the left half, slot 1 the right, keeping the stream's aspect ratio */
+static void session_split_area(const session_t *session, SS4S_VideoRect *area) {
+    int half = session->display_width / 2;
+    int width = half, height = half * session->config.stream.height / session->config.stream.width;
+    if (height > session->display_height) {
+        height = session->display_height;
+        width = height * session->config.stream.width / session->config.stream.height;
+    }
+    area->x = session->slot * half + (half - width) / 2;
+    area->y = (session->display_height - height) / 2;
+    area->width = width;
+    area->height = height;
+}

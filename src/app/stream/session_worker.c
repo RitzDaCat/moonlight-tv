@@ -12,10 +12,21 @@
 #include "app_session.h"
 #include "backend/pcmanager/worker/worker.h"
 
+/* The streaming screen follows the main session; the split screen session runs without it */
+static void session_push_event(const session_t *session, int code) {
+    if (session->slot == 0) {
+        bus_pushevent(code, NULL, NULL);
+    }
+}
+
+static void session_start_split_input(session_t *session) {
+    session_start_input(session);
+}
+
 int session_worker(session_t *session) {
     app_t *app = session->app;
     session_set_state(session, STREAMING_CONNECTING);
-    bus_pushevent(USER_STREAM_CONNECTING, NULL, NULL);
+    session_push_event(session, USER_STREAM_CONNECTING);
     streaming_error(session, GS_OK, "");
     PSERVER_DATA server = session->server;
     int appId = session->app_id;
@@ -37,7 +48,8 @@ int session_worker(session_t *session) {
     }
 #endif
     int ret = gs_start_app(client, server, &session->config.stream, appId, server->isGfe, session->config.sops,
-                           session->config.local_audio, app_input_gamepads_mask(&app->input), surround_params);
+                           session->config.local_audio,
+                           session_host_gamepad_mask(session, app_input_gamepads_mask(&app->input)), surround_params);
     if (ret != GS_OK) {
         session_set_state(session, STREAMING_ERROR);
         const char *gs_error = NULL;
@@ -92,14 +104,18 @@ int session_worker(session_t *session) {
         goto thread_cleanup;
     }
     session_set_state(session, STREAMING_STREAMING);
-    bus_pushevent(USER_STREAM_OPEN, NULL, NULL);
+    session_push_event(session, USER_STREAM_OPEN);
+    if (session->slot != 0) {
+        // The streaming screen starts input for the main session only
+        app_bus_post(app, (bus_actionfunc) session_start_split_input, session);
+    }
     SDL_LockMutex(session->mutex);
     while (!session->interrupted) {
         // Wait until interrupted
         SDL_CondWait(session->cond, session->mutex);
     }
     SDL_UnlockMutex(session->mutex);
-    bus_pushevent(USER_STREAM_CLOSE, NULL, NULL);
+    session_push_event(session, USER_STREAM_CLOSE);
 
     session_set_state(session, STREAMING_DISCONNECTING);
     mlc->LiStopConnection();
@@ -123,7 +139,7 @@ int session_worker(session_t *session) {
         SS4S_PlayerClose(session->player);
     }
     gs_destroy(client);
-    bus_pushevent(USER_STREAM_FINISHED, NULL, NULL);
-    app_bus_post(app, (bus_actionfunc) app_session_destroy, app);
+    session_push_event(session, USER_STREAM_FINISHED);
+    app_bus_post(app, (bus_actionfunc) (session->slot == 0 ? app_session_destroy : app_session_destroy_split), app);
     return 0;
 }

@@ -6,6 +6,10 @@ bool session_handle_input_event(session_t *session, const SDL_Event *event) {
     if (!session_accepting_input(session)) {
         return false;
     }
+    // Keyboard, mouse and touch belong to the main session; the split screen session only takes its gamepads
+    if (session->slot != 0 && (event->type < SDL_CONTROLLERAXISMOTION || event->type > SDL_CONTROLLERSENSORUPDATE)) {
+        return false;
+    }
     stream_input_t *input = &session->input;
     switch (event->type) {
         case SDL_KEYDOWN:

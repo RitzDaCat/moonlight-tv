@@ -55,6 +55,8 @@ typedef struct app_t {
 #endif
     app_wakelock_t *wakelock;
     session_t *session;
+    /* Right half in split screen; ends with session, never outlives it */
+    session_t *split_session;
 } app_t;
 
 int app_init(app_t *app, app_settings_loader *settings_loader, int argc, char *argv[]);

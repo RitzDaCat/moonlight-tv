@@ -40,7 +40,38 @@ struct session_t {
     /* Stream library copy driving this session, index into mlc_slots */
     int slot;
     const mlc_api_t *mlc;
+    /* Split screen: gamepads alternate between the sessions by app-wide id (even → slot 0, odd → slot 1),
+     * each host numbering its own pads from 0 */
+    bool split;
 };
+
+static inline bool session_owns_gamepad(const session_t *session, short gs_id) {
+    return !session->split || (gs_id & 1) == session->slot;
+}
+
+/* App-wide gamepad id to the id this session's host sees */
+static inline short session_host_gamepad_id(const session_t *session, short gs_id) {
+    return session->split ? (short) (gs_id >> 1) : gs_id;
+}
+
+/* Host gamepad id back to the app-wide id, for rumble and LED requests */
+static inline short session_app_gamepad_id(const session_t *session, short host_id) {
+    return session->split ? (short) ((host_id << 1) | session->slot) : host_id;
+}
+
+/* App-wide gamepad mask to the mask this session's host sees */
+static inline short session_host_gamepad_mask(const session_t *session, short mask) {
+    if (!session->split) {
+        return mask;
+    }
+    short host_mask = 0;
+    for (int host_id = 0; (mask >> session->slot) >> (host_id << 1); host_id++) {
+        if (mask & (1 << ((host_id << 1) | session->slot))) {
+            host_mask |= (short) (1 << host_id);
+        }
+    }
+    return host_mask;
+}
 
 void session_set_state(session_t *session, STREAMING_STATE state);
 

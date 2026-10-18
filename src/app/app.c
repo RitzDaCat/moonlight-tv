@@ -142,7 +142,7 @@ static int app_event_filter(void *userdata, SDL_Event *event) {
         case SDL_APP_WILLENTERBACKGROUND: {
             // Interrupt streaming because app will go to background
             if (app_ui_is_opened(&app->ui) && app->session != NULL) {
-                session_interrupt(app->session, false, STREAMING_INTERRUPT_BACKGROUND);
+                app_session_interrupt(app, false, STREAMING_INTERRUPT_BACKGROUND);
             }
             break;
         }
@@ -160,7 +160,7 @@ static int app_event_filter(void *userdata, SDL_Event *event) {
 #if !FEATURE_FORCE_FULLSCREEN
                     if (app_configuration->fullscreen && app_ui_is_opened(&app->ui) && app->session != NULL) {
                         // Interrupt streaming because app will go to background
-                        session_interrupt(app->session, false, STREAMING_INTERRUPT_BACKGROUND);
+                        app_session_interrupt(app, false, STREAMING_INTERRUPT_BACKGROUND);
                     }
 #endif
                     app->focused = false;
@@ -174,7 +174,7 @@ static int app_event_filter(void *userdata, SDL_Event *event) {
                     commons_log_debug("SDL", "Window event SDL_WINDOWEVENT_HIDDEN");
                     if (app_configuration->fullscreen && app_ui_is_opened(&app->ui) && app->session != NULL) {
                         // Interrupt streaming because app will go to background
-                        session_interrupt(app->session, false, STREAMING_INTERRUPT_BACKGROUND);
+                        app_session_interrupt(app, false, STREAMING_INTERRUPT_BACKGROUND);
                     }
                     break;
                 case SDL_WINDOWEVENT_EXPOSED: {
@@ -225,6 +225,9 @@ static int app_event_filter(void *userdata, SDL_Event *event) {
             app_input_handle_event(&app->input, event);
             if (app->session != NULL) {
                 session_handle_input_event(app->session, event);
+                if (app->split_session != NULL) {
+                    session_handle_input_event(app->split_session, event);
+                }
                 return 0;
             }
             break;
@@ -251,6 +254,9 @@ static int app_event_filter(void *userdata, SDL_Event *event) {
             }
             if (!app_ui_is_opened(&app->ui) && app->session != NULL) {
                 session_handle_input_event(app->session, event);
+                if (app->split_session != NULL) {
+                    session_handle_input_event(app->split_session, event);
+                }
                 return 0;
             }
             return 1;
