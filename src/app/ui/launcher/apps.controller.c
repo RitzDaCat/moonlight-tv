@@ -196,6 +196,23 @@ static lv_obj_t *apps_view(lv_fragment_t *self, lv_obj_t *container) {
     lv_obj_update_layout(applist);
 
     lv_gridview_set_adapter(applist, &apps_adapter);
+#if FEATURE_SPLIT_SCREEN
+    const char *split_banner = split_launch_pick_banner(&controller->uuid);
+    if (split_banner != NULL) {
+        lv_obj_t *banner = lv_label_create(view);
+        lv_label_set_text(banner, split_banner);
+        lv_label_set_long_mode(banner, LV_LABEL_LONG_WRAP);
+        lv_obj_set_width(banner, LV_PCT(100));
+        lv_obj_set_style_pad_hor(banner, lv_dpx(24), 0);
+        lv_obj_set_style_pad_ver(banner, lv_dpx(12), 0);
+        lv_obj_set_style_bg_color(banner, lv_palette_main(LV_PALETTE_BLUE_GREY), 0);
+        lv_obj_set_style_bg_opa(banner, LV_OPA_50, 0);
+        lv_obj_add_flag(banner, LV_OBJ_FLAG_FLOATING);
+        lv_obj_align(banner, LV_ALIGN_TOP_MID, 0, 0);
+        lv_obj_update_layout(banner);
+        lv_obj_set_style_pad_top(applist, lv_obj_get_height(banner) + lv_dpx(24), 0);
+    }
+#endif
     lv_obj_t *appload = controller->appload = lv_spinner_create(view, 1000, 60);
     launcher_fragment_t *parent_controller = (launcher_fragment_t *) lv_fragment_get_parent(&controller->base);
     lv_group_add_obj(parent_controller->detail_group, appload);
@@ -295,6 +312,9 @@ static void on_destroy_view(lv_fragment_t *self, lv_obj_t *view) {
     LV_UNUSED(view);
     current_instance = NULL;
     apps_fragment_t *controller = (apps_fragment_t *) self;
+#if FEATURE_SPLIT_SCREEN
+    split_launch_cancel(&controller->uuid);
+#endif
     controller->show_hidden_apps = false;
     pcmanager_unregister_listener(pcmanager, &pc_listeners);
     coverloader_unref(controller->coverloader);
@@ -557,6 +577,12 @@ static void item_click_cb(lv_event_t *event) {
         return;
     }
     appitem_viewholder_t *holder = (appitem_viewholder_t *) lv_obj_get_user_data(target);
+#if FEATURE_SPLIT_SCREEN
+    const apploader_item_t *split_item = apploader_list_item_by_id(controller->apploader_apps, holder->app_id);
+    if (split_item != NULL && split_launch_pick(controller->global, &controller->uuid, &split_item->base)) {
+        return;
+    }
+#endif
     int current_app = pcmanager_server_current_app(pcmanager, &controller->uuid);
     if (current_app != 0) {
         if (holder->app_id == current_app) {
@@ -770,7 +796,7 @@ static void context_menu_click_cb(lv_event_t *e) {
     const apploader_item_t *app = apploader_list_item_by_id(self->apploader_apps, holder->app_id);
     assert(app != NULL);
 #if FEATURE_SPLIT_SCREEN
-    if (split_launch_handle_click(target, self->global, &self->uuid, &app->base)) {
+    if (split_launch_handle_click(target, &self->uuid, &app->base)) {
         lv_msgbox_close_async(mbox);
         return;
     }
