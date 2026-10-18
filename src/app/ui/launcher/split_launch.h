@@ -8,7 +8,8 @@
 
 typedef struct app_t app_t;
 
-/* Adds "Split screen with <host>" to an app's context menu for every other paired, online host */
+/* Adds "Split screen with <host>" to an app's context menu for every other host not known to be
+ * offline or unpaired */
 void split_launch_add_menu_items(lv_obj_t *content, const uuidstr_t *uuid);
 
 /* If btn is one of those items: remembers the app for the left half and opens the partner host's games,

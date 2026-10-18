@@ -24,7 +24,10 @@ static void pending_clear();
 
 void split_launch_add_menu_items(lv_obj_t *content, const uuidstr_t *uuid) {
     for (const pclist_t *node = pcmanager_servers(pcmanager); node != NULL; node = node->next) {
-        if (uuidstr_t_equals_t(&node->id, uuid) || node->state.code != SERVER_STATE_AVAILABLE) {
+        // Hosts not queried yet are listed too: opening their games queries them
+        SERVER_STATE_ENUM state = node->state.code;
+        if (uuidstr_t_equals_t(&node->id, uuid) ||
+            (state != SERVER_STATE_AVAILABLE && state != SERVER_STATE_NONE && state != SERVER_STATE_QUERYING)) {
             continue;
         }
         lv_obj_t *btn = lv_list_add_btn(content, NULL, NULL);
