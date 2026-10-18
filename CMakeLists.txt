@@ -359,6 +359,14 @@ endif ()
 
 add_subdirectory(src)
 
+# Split screen needs a second stream library copy, made from the static archive
+get_target_property(MLCOMMON_TYPE moonlight-common-c TYPE)
+if (MLCOMMON_TYPE STREQUAL "STATIC_LIBRARY")
+    include(MlcSecondCopy)
+    add_mlc_second_copy(moonlight-lib)
+    target_compile_definitions(moonlight-lib PUBLIC FEATURE_SPLIT_SCREEN=1)
+endif ()
+
 if (NOT DEFINED CMAKE_INSTALL_BINDIR)
     set(CMAKE_INSTALL_BINDIR bin)
 endif ()

@@ -74,7 +74,8 @@ typedef struct app_t app_t;
 typedef struct app_settings_t app_settings_t;
 typedef struct session_t session_t;
 
-session_t *session_create(app_t *app, const app_settings_t *config, const SERVER_DATA *server, const APP_LIST *gs_app);
+session_t *session_create(app_t *app, const app_settings_t *config, const SERVER_DATA *server, const APP_LIST *gs_app,
+                          int slot);
 
 void session_destroy(session_t *session);
 

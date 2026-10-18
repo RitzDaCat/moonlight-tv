@@ -13,7 +13,7 @@ int app_session_begin(app_t *app, const uuidstr_t *uuid, const APP_LIST *gs_app)
         commons_log_error("App", "Failed to find node %s", (const char *) uuid);
         return -1;
     }
-    app->session = session_create(app, app_configuration, node->server, gs_app);
+    app->session = session_create(app, app_configuration, node->server, gs_app, 0);
     return 0;
 }
 

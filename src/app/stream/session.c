@@ -31,11 +31,14 @@ static void session_config_init(app_t *app, session_config_t *config, const SERV
 
 static void populate_hdr_info_vui(SS4S_VideoHDRInfo *info, const STREAM_CONFIGURATION *config);
 
-session_t *session_create(app_t *app, const CONFIGURATION *config, const SERVER_DATA *server, const APP_LIST *gs_app) {
+session_t *session_create(app_t *app, const CONFIGURATION *config, const SERVER_DATA *server, const APP_LIST *gs_app,
+                          int slot) {
     session_t *session = malloc(sizeof(session_t));
     SDL_memset(session, 0, sizeof(session_t));
     session_config_init(app, &session->config, server, config);
     session->app = app;
+    session->slot = slot;
+    session->mlc = &mlc_slots[slot];
     session->display_width = app->ui.width;
     session->display_height = app->ui.height;
     session->audio_cap = app->ss4s.audio_cap;
@@ -188,7 +191,7 @@ void streaming_set_hdr(session_t *session, bool hdr) {
     SS_HDR_METADATA hdr_metadata;
     if (!hdr) {
         SS4S_PlayerVideoSetHDRInfo(session->player, NULL);
-    } else if (LiGetHdrMetadata(&hdr_metadata)) {
+    } else if (session->mlc->LiGetHdrMetadata(&hdr_metadata)) {
         SS4S_VideoHDRInfo info = {
                 .displayPrimariesX = {
                         hdr_metadata.displayPrimaries[0].x,

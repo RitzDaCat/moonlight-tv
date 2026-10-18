@@ -8,6 +8,7 @@
 #include "stream/input/session_input.h"
 #include "stream/session.h"
 #include "embed_wrapper.h"
+#include "mlc_slot.h"
 
 typedef struct app_t app_t;
 
@@ -36,6 +37,9 @@ struct session_t {
     SDL_mutex *mutex;
     SDL_Thread *thread;
     SS4S_Player *player;
+    /* Stream library copy driving this session, index into mlc_slots */
+    int slot;
+    const mlc_api_t *mlc;
 };
 
 void session_set_state(session_t *session, STREAMING_STATE state);

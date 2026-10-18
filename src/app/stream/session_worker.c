@@ -61,9 +61,10 @@ int session_worker(session_t *session) {
     SS4S_PlayerSetViewportSize(session->player, app->ui.width, app->ui.height);
     SS4S_PlayerSetUserdata(session->player, app);
 
-    int startResult = LiStartConnection(&server->serverInfo, &session->config.stream,
-                                        session_connection_callbacks_prepare(session),
-                                        &ss4s_dec_callbacks, &ss4s_aud_callbacks, session, 0, session, 0);
+    const mlc_api_t *mlc = session->mlc;
+    int startResult = mlc->LiStartConnection(&server->serverInfo, &session->config.stream,
+                                             mlc->session_connection_callbacks_prepare(session),
+                                             mlc->ss4s_dec_callbacks, mlc->ss4s_aud_callbacks, session, 0, session, 0);
     if (startResult != 0) {
         session_set_state(session, STREAMING_ERROR);
         switch (startResult) {
@@ -101,7 +102,7 @@ int session_worker(session_t *session) {
     bus_pushevent(USER_STREAM_CLOSE, NULL, NULL);
 
     session_set_state(session, STREAMING_DISCONNECTING);
-    LiStopConnection();
+    mlc->LiStopConnection();
 
     if (session->quitapp) {
         commons_log_info("Session", "Sending app quit request ...");
@@ -117,7 +118,7 @@ int session_worker(session_t *session) {
     // Don't always reset status as error state should be kept
     session_set_state(session, STREAMING_NONE);
     thread_cleanup:
-    session_connection_callbacks_reset(session);
+    session->mlc->session_connection_callbacks_reset(session);
     if (session->player != NULL) {
         SS4S_PlayerClose(session->player);
     }
