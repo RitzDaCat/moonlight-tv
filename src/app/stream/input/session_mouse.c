@@ -34,28 +34,28 @@ void stream_input_handle_mbutton(stream_input_t *input, const SDL_MouseButtonEve
             return;
     }
     if (event->which == SDL_TOUCH_MOUSEID) {
-        if (LiGetHostFeatureFlags() & LI_FF_PEN_TOUCH_EVENTS) {
+        if (input->session->mlc->LiGetHostFeatureFlags() & LI_FF_PEN_TOUCH_EVENTS) {
             // Don't send mouse events from touch devices if the host supports pen/touch events
             return;
         }
-        LiSendMousePositionEvent((short) event->x, (short) event->y, (short) input->session->display_width,
+        input->session->mlc->LiSendMousePositionEvent((short) event->x, (short) event->y, (short) input->session->display_width,
                                  (short) input->session->display_height);
     }
-    LiSendMouseButtonEvent(event->state == SDL_PRESSED ? BUTTON_ACTION_PRESS : BUTTON_ACTION_RELEASE,
+    input->session->mlc->LiSendMouseButtonEvent(event->state == SDL_PRESSED ? BUTTON_ACTION_PRESS : BUTTON_ACTION_RELEASE,
                            button);
 }
 
 void stream_input_handle_mwheel(stream_input_t *input, const SDL_MouseWheelEvent *event) {
     (void) input;
-    if (event->which == SDL_TOUCH_MOUSEID && LiGetHostFeatureFlags() & LI_FF_PEN_TOUCH_EVENTS) {
+    if (event->which == SDL_TOUCH_MOUSEID && input->session->mlc->LiGetHostFeatureFlags() & LI_FF_PEN_TOUCH_EVENTS) {
         // Don't send mouse events from touch devices if the host supports pen/touch events
         return;
     }
     if (event->y != 0) {
-        LiSendScrollEvent((signed char) event->y);
+        input->session->mlc->LiSendScrollEvent((signed char) event->y);
     }
     if (event->x != 0) {
-        LiSendHScrollEvent((signed char) event->x);
+        input->session->mlc->LiSendHScrollEvent((signed char) event->x);
     }
 }
 
@@ -63,7 +63,7 @@ void stream_input_handle_mmotion(stream_input_t *input, const SDL_MouseMotionEve
     if (input->view_only) {
         return;
     }
-    if (event->which == SDL_TOUCH_MOUSEID && LiGetHostFeatureFlags() & LI_FF_PEN_TOUCH_EVENTS) {
+    if (event->which == SDL_TOUCH_MOUSEID && input->session->mlc->LiGetHostFeatureFlags() & LI_FF_PEN_TOUCH_EVENTS) {
         // Don't send mouse events from touch devices if the host supports pen/touch events
         return;
     }
@@ -71,11 +71,11 @@ void stream_input_handle_mmotion(stream_input_t *input, const SDL_MouseMotionEve
         if (!hw_mouse) {
             return;
         }
-        LiSendMouseMoveEvent((short) event->xrel, (short) event->yrel);
+        input->session->mlc->LiSendMouseMoveEvent((short) event->xrel, (short) event->yrel);
     } else if (app_get_mouse_relative() && event->which != SDL_TOUCH_MOUSEID) {
-        LiSendMouseMoveEvent((short) event->xrel, (short) event->yrel);
+        input->session->mlc->LiSendMouseMoveEvent((short) event->xrel, (short) event->yrel);
     } else {
-        LiSendMousePositionEvent((short) event->x, (short) event->y, (short) input->session->display_width,
+        input->session->mlc->LiSendMousePositionEvent((short) event->x, (short) event->y, (short) input->session->display_width,
                                  (short) input->session->display_height);
     }
 }

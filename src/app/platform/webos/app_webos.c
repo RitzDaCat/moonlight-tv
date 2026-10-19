@@ -59,6 +59,21 @@ app_launch_params_t *app_handle_launch(app_t *app, int argc, char *argv[]) {
         return NULL;
     }
     app_launch_params_t *params = calloc(1, sizeof(app_launch_params_t));
+    if (params == NULL) {
+        jdomparser_release(&parser);
+        return NULL;
+    }
+    jvalue_ref microphone_probe = jobject_get(params_obj, J_CSTR_TO_BUF("microphone_probe"));
+    if (jis_boolean(microphone_probe)) {
+        jboolean_get(microphone_probe, &params->microphone_probe);
+    }
+    jvalue_ref microphone_device = jobject_get(params_obj, J_CSTR_TO_BUF("microphone_probe_device"));
+    if (params->microphone_probe && jis_string(microphone_device)) {
+        raw_buffer buf = jstring_get(microphone_device);
+        if (buf.m_len > 0 && buf.m_len <= 1024 && memchr(buf.m_str, '\0', buf.m_len) == NULL) {
+            params->microphone_probe_device = strndup(buf.m_str, buf.m_len);
+        }
+    }
     jvalue_ref host_uuid = jobject_get(params_obj, J_CSTR_TO_BUF("host_uuid"));
     if (jis_string(host_uuid)) {
         raw_buffer buf = jstring_get(host_uuid);

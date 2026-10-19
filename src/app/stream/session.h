@@ -3,6 +3,7 @@
 #include <stdbool.h>
 
 #include "backend/pcmanager.h"
+#include "ss4s/video.h"
 
 enum STREAMING_STATE {
     STREAMING_NONE,
@@ -29,15 +30,18 @@ typedef struct VIDEO_STATS {
     uint32_t receivedFrames;
     uint32_t networkDroppedFrames;
     uint32_t submittedFrames;
-    uint32_t totalReassemblyTimeUs;
-    uint32_t totalSubmitTimeUs;
+    uint64_t totalReassemblyTimeUs;
+    uint64_t totalSubmitTimeUs;
+    uint64_t totalFeedTimeUs;
     unsigned long measurementStartTimestamp;
-    uint32_t totalCaptureLatency;
+    uint64_t totalCaptureLatency;
+    uint32_t hostLatencyFrames;
     float totalFps;
     float receivedFps;
     float decodedFps;
     float avgDecoderLatency;
     uint32_t rtt, rttVariance;
+    SS4S_VideoDiagnostics diagnostics;
 } VIDEO_STATS;
 
 typedef struct VIDEO_INFO {

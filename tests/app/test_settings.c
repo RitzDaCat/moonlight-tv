@@ -35,6 +35,10 @@ void testReadINI() {
 }
 
 void testWriteINI() {
+    settings.split_audio_gain_db[0] = -6;
+    settings.split_audio_gain_db[1] = -18;
+    settings.split_audio_muted[0] = true;
+    settings.split_audio_muted[1] = false;
     settings.touchpad_mode = TOUCHPAD_MODE_MOUSE;
     settings.touchpad_speed = 175;
     settings.touchpad_multitouch = false;
@@ -56,6 +60,10 @@ void testWriteINI() {
     TEST_ASSERT_EQUAL_INT(175, loaded.touchpad_speed);
     TEST_ASSERT_FALSE(loaded.touchpad_multitouch);
     TEST_ASSERT_FALSE(loaded.touchpad_natural_scroll);
+    TEST_ASSERT_EQUAL_INT(-6, loaded.split_audio_gain_db[0]);
+    TEST_ASSERT_EQUAL_INT(-18, loaded.split_audio_gain_db[1]);
+    TEST_ASSERT_TRUE(loaded.split_audio_muted[0]);
+    TEST_ASSERT_FALSE(loaded.split_audio_muted[1]);
 
     settings_clear(&loaded);
     remove("settings_write_tmp.ini");

@@ -10,6 +10,10 @@ typedef struct app_t app_t;
 typedef struct {
     lv_fragment_t base;
     app_t *global;
+    bool split;
+    struct {
+        lv_obj_t *gain, *gain_label, *muted;
+    } stream_audio[2];
     lv_obj_t *detached_root;
     lv_obj_t *hint;
     lv_obj_t *overlay;
@@ -28,6 +32,10 @@ typedef struct {
         lv_obj_t *drop_rate;
         lv_obj_t *host_latency;
         lv_obj_t *vdec_latency;
+        lv_obj_t *submit_latency;
+        lv_obj_t *feed_latency;
+        lv_obj_t *assembly_latency;
+        lv_obj_t *queue_latency;
     } stats_items;
     lv_obj_t *stats_pin;
     lv_obj_t *notice, *notice_label;

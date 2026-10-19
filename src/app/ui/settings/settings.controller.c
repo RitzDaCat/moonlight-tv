@@ -10,6 +10,7 @@
 #include "util/font.h"
 #include "util/i18n.h"
 #include "lvgl/theme/lv_theme_moonlight.h"
+#include "ui/tv_style.h"
 
 typedef struct {
     const char *icon;
@@ -112,6 +113,7 @@ static void on_view_created(lv_fragment_t *self, lv_obj_t *view) {
             lv_obj_t *page = lv_tabview_add_tab(controller->tabview, entry.icon);
             lv_obj_add_event_cb(page, cb_child_group_add, LV_EVENT_CHILD_CREATED, tab_group);
             lv_obj_add_event_cb(page, pane_child_added, LV_EVENT_CHILD_CREATED, controller);
+            lv_obj_add_event_cb(page, on_back_request, LV_EVENT_CANCEL, controller);
             lv_fragment_t *pane = lv_fragment_create(entry.cls, controller);
             lv_fragment_create_obj(pane, page);
             lv_obj_set_user_data(page, pane);
@@ -121,6 +123,7 @@ static void on_view_created(lv_fragment_t *self, lv_obj_t *view) {
                 lv_obj_clear_state(tab_focused, LV_STATE_FOCUS_KEY);
             }
         }
+        lv_obj_add_event_cb(controller->nav, on_back_request, LV_EVENT_CANCEL, controller);
     } else {
         controller->nav_group = lv_group_create();
         controller->detail_group = lv_group_create();
@@ -145,9 +148,16 @@ static void on_view_created(lv_fragment_t *self, lv_obj_t *view) {
 
             lv_obj_set_style_bg_opa(item_view, LV_OPA_COVER, LV_STATE_FOCUS_KEY);
             lv_obj_add_flag(item_view, LV_OBJ_FLAG_EVENT_BUBBLE);
+            lv_obj_set_style_bg_opa(item_view, LV_OPA_TRANSP, 0);
+            lv_obj_set_style_bg_color(item_view, lv_color_hex(0x263449), LV_STATE_CHECKED);
+            lv_obj_set_style_bg_opa(item_view, LV_OPA_COVER, LV_STATE_CHECKED);
+            tv_focus_style(item_view);
             item_view->user_data = (void *) entry.cls;
         }
         show_pane(controller, entries[0].cls);
+        lv_group_add_obj(controller->nav_group, controller->close_btn);
+        lv_obj_add_event_cb(controller->close_btn, on_nav_key, LV_EVENT_KEY, controller);
+        lv_obj_add_event_cb(controller->close_btn, on_back_request, LV_EVENT_CANCEL, controller);
     }
 }
 
@@ -212,7 +222,7 @@ static void show_pane(settings_controller_t *controller, const lv_fragment_class
     lv_fragment_manager_replace(controller->base.child_manager, fragment, &controller->detail);
     lv_obj_scroll_to_y(controller->detail, 0, LV_ANIM_OFF);
     lv_obj_t *focused = lv_group_get_focused(controller->detail_group);
-    lv_event_send(focused, LV_EVENT_DEFOCUSED, NULL);
+    if (focused) lv_event_send(focused, LV_EVENT_DEFOCUSED, NULL);
 }
 
 static void on_entry_click(lv_event_t *event) {
@@ -222,14 +232,7 @@ static void on_entry_click(lv_event_t *event) {
     lv_fragment_t *pane = lv_fragment_manager_find_by_container(controller->base.child_manager,
                                                                 controller->detail);
     if (!pane) { return; }
-    lv_obj_t *first_focusable = NULL;
-    for (int i = 0, j = (int) lv_obj_get_child_cnt(pane->obj); i < j; i++) {
-        lv_obj_t *child = lv_obj_get_child(pane->obj, i);
-        if (lv_obj_get_group(child)) {
-            first_focusable = child;
-            break;
-        }
-    }
+    lv_obj_t *first_focusable = lv_group_get_focused(controller->detail_group);
     if (!first_focusable) { return; }
     app_input_set_group(&controller->app->ui.input, controller->detail_group);
     lv_indev_t *indev = lv_indev_get_act();
@@ -242,14 +245,14 @@ static void on_nav_key(lv_event_t *event) {
     switch (lv_event_get_key(event)) {
         case LV_KEY_DOWN: {
             lv_obj_t *target = lv_event_get_target(event);
-            if (lv_obj_get_parent(target) != controller->nav) { return; }
+            if (lv_obj_get_parent(target) != controller->nav && target != controller->close_btn) { return; }
             lv_group_t *group = controller->nav_group;
             lv_group_focus_next(group);
             break;
         }
         case LV_KEY_UP: {
             lv_obj_t *target = lv_event_get_target(event);
-            if (lv_obj_get_parent(target) != controller->nav) { return; }
+            if (lv_obj_get_parent(target) != controller->nav && target != controller->close_btn) { return; }
             lv_group_t *group = controller->nav_group;
             lv_group_focus_prev(group);
             break;
@@ -309,7 +312,10 @@ static void on_back_request(lv_event_t *e) {
         controller->active_dropdown = NULL;
         return;
     }
-    if (lv_obj_has_state(controller->detail, LV_STATE_FOCUS_KEY)) {
+    if (controller->mini && app_input_get_group(&controller->app->ui.input) != controller->nav_group) {
+        app_input_set_group(&controller->app->ui.input, controller->nav_group);
+        lv_obj_add_state(controller->nav, LV_STATE_FOCUS_KEY);
+    } else if (!controller->mini && app_input_get_group(&controller->app->ui.input) == controller->detail_group) {
         detail_defocus(controller, e);
     } else {
         settings_close(e);
@@ -327,7 +333,7 @@ static void on_tab_key(lv_event_t *event) {
         }
         case LV_KEY_RIGHT: {
             uint16_t act = lv_tabview_get_tab_act(controller->tabview);
-            if (act >= entries_len) { return; }
+            if (act + 1 >= entries_len) { return; }
             lv_tabview_set_act(controller->tabview, act + 1, true);
             break;
         }

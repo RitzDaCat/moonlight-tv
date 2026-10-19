@@ -1,12 +1,15 @@
 #pragma once
 
 #include "uuidstr.h"
+#include <stdbool.h>
 
 typedef struct app_t app_t;
 
 typedef struct app_launch_params_t {
     uuidstr_t default_host_uuid;
     int default_app_id;
+    bool microphone_probe;
+    char *microphone_probe_device;
 } app_launch_params_t;
 
 app_launch_params_t *app_handle_launch(app_t *app, int argc, char *argv[]);

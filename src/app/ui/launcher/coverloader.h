@@ -18,3 +18,7 @@ void coverloader_unref(coverloader_t *loader);
 
 void coverloader_display(coverloader_t *loader, const uuidstr_t *uuid, int id, lv_obj_t *target,
                          lv_coord_t target_width, lv_coord_t target_height);
+
+/* Cropped host art with a precomputed scrim; no work in the streaming render path. */
+void coverloader_display_backdrop(coverloader_t *loader, const uuidstr_t *uuid, int id, lv_obj_t *target,
+                                  lv_coord_t target_width, lv_coord_t target_height);

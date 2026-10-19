@@ -69,6 +69,11 @@ int session_worker(session_t *session) {
                      CHANNEL_COUNT_FROM_AUDIO_CONFIGURATION(session->config.stream.audioConfiguration));
 
     session->player = SS4S_PlayerOpen();
+    if (session->player == NULL) {
+        session_set_state(session, STREAMING_ERROR);
+        streaming_error(session, GS_WRONG_STATE, "Failed to create decoder player");
+        goto thread_cleanup;
+    }
     SS4S_PlayerSetWaitAudioVideoReady(session->player, true);
     SS4S_PlayerSetViewportSize(session->player, app->ui.width, app->ui.height);
     SS4S_PlayerSetUserdata(session->player, app);

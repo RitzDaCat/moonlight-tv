@@ -48,6 +48,7 @@ typedef struct touchpad_finger_t {
 } touchpad_finger_t;
 
 struct session_input_touchpad_t {
+    const mlc_api_t *mlc;
     touchpad_finger_t fingers[TOUCHPAD_TRACKED_FINGERS];
     uint8_t active_fingers;
     float motion_remainder_x, motion_remainder_y;
@@ -66,7 +67,6 @@ static bool gamepad_combo_check(int buttons, short combo);
 static bool sensor_state_needs_update(const app_gamepad_sensor_state_t *state, uint32_t timestamp,
                                       const float data[3]);
 
-static bool vmouse_intercepted(stream_input_t *input, const app_gamepad_state_t *gamepad);
 
 static bool filter_deadzone_2axis(stream_input_t *input, short *x, short *y);
 
@@ -94,7 +94,7 @@ static void touchpad_begin_settling(session_input_touchpad_t *state);
 
 static bool touchpad_settled(const session_input_touchpad_t *state);
 
-static void touchpad_send_mouse_click(int mouse_button);
+static void touchpad_send_mouse_click(stream_input_t *input, int mouse_button);
 
 static short touchpad_take_delta(float *remainder);
 
@@ -112,6 +112,9 @@ void stream_input_touchpad_mouse_init(stream_input_t *input) {
     input->touchpads = SDL_calloc((size_t) count, sizeof(*input->touchpads));
     if (input->touchpads != NULL) {
         input->touchpad_count = count;
+        for (short i = 0; i < count; ++i) {
+            input->touchpads[i].mlc = input->session->mlc;
+        }
     }
 }
 
@@ -212,7 +215,7 @@ void stream_input_handle_cbutton(stream_input_t *input, const SDL_ControllerButt
                     touchpad_begin_settling(state);
                 }
 
-                LiSendMouseButtonEvent(event->type == SDL_CONTROLLERBUTTONDOWN ?
+                input->session->mlc->LiSendMouseButtonEvent(event->type == SDL_CONTROLLERBUTTONDOWN ?
                                        BUTTON_ACTION_PRESS : BUTTON_ACTION_RELEASE, mouse_button);
                 return;
             }
@@ -266,6 +269,14 @@ void stream_input_handle_cbutton(stream_input_t *input, const SDL_ControllerButt
     if (input->view_only) {
         return;
     }
+    app_gamepad_state_t filtered = *gamepad;
+    filter_deadzone_2axis(input, &filtered.leftStickX, &filtered.leftStickY);
+    filter_deadzone_2axis(input, &filtered.rightStickX, &filtered.rightStickY);
+    if (session_input_is_vmouse_active(&input->vmouse)) {
+        filtered.leftTrigger = filtered.rightTrigger = 0;
+        filtered.rightStickX = filtered.rightStickY = 0;
+    }
+    gamepad = &filtered;
     input->session->mlc->LiSendMultiControllerEvent(HOST_ID(input, gamepad), HOST_MASK(input), gamepad->buttons, gamepad->leftTrigger,
                                gamepad->rightTrigger, gamepad->leftStickX, gamepad->leftStickY, gamepad->rightStickX,
                                gamepad->rightStickY);
@@ -313,10 +324,12 @@ void stream_input_handle_caxis(stream_input_t *input, const SDL_ControllerAxisEv
         return;
     }
 
-    filter_deadzone_2axis(input, &gamepad->leftStickX, &gamepad->leftStickY);
-    filter_deadzone_2axis(input, &gamepad->rightStickX, &gamepad->rightStickY);
+    app_gamepad_state_t filtered = *gamepad;
+    filter_deadzone_2axis(input, &filtered.leftStickX, &filtered.leftStickY);
+    filter_deadzone_2axis(input, &filtered.rightStickX, &filtered.rightStickY);
+    gamepad = &filtered;
 
-    if (vmouse_intercepted(input, gamepad)) {
+    if (session_input_is_vmouse_active(&input->vmouse)) {
         vmouse_set_vector(&input->vmouse, gamepad->rightStickX, gamepad->rightStickY);
         vmouse_set_trigger(&input->vmouse, gamepad->leftTrigger, gamepad->rightTrigger);
         input->session->mlc->LiSendMultiControllerEvent(HOST_ID(input, gamepad), HOST_MASK(input), gamepad->buttons, 0, 0,
@@ -424,7 +437,7 @@ void stream_input_handle_ctouchpad(stream_input_t *input, const SDL_ControllerTo
                                                  finger->down_timestamp + TOUCHPAD_TAP_THRESHOLD_MS);
             if (hold_elapsed) {
                 state->tap_state = TOUCHPAD_TAP_SINGLE_HOLD;
-                LiSendMouseButtonEvent(BUTTON_ACTION_PRESS, BUTTON_LEFT);
+                input->session->mlc->LiSendMouseButtonEvent(BUTTON_ACTION_PRESS, BUTTON_LEFT);
             } else {
                 touchpad_end_tap(state);
             }
@@ -471,7 +484,7 @@ void stream_input_handle_ctouchpad(stream_input_t *input, const SDL_ControllerTo
             touchpad_end_tap(state);
         } else if (finger != NULL && state->tap_state == TOUCHPAD_TAP_SINGLE_PENDING) {
             if (event->timestamp - finger->down_timestamp <= TOUCHPAD_TAP_THRESHOLD_MS) {
-                touchpad_send_mouse_click(BUTTON_LEFT);
+                touchpad_send_mouse_click(input, BUTTON_LEFT);
             }
             touchpad_end_tap(state);
         }
@@ -481,7 +494,7 @@ void stream_input_handle_ctouchpad(stream_input_t *input, const SDL_ControllerTo
                                  ? state->fingers[0].down_timestamp
                                  : state->fingers[1].down_timestamp;
             if (event->timestamp - tap_start <= TOUCHPAD_TAP_THRESHOLD_MS) {
-                touchpad_send_mouse_click(BUTTON_RIGHT);
+                touchpad_send_mouse_click(input, BUTTON_RIGHT);
             }
             touchpad_end_tap(state);
         }
@@ -533,10 +546,10 @@ void stream_input_handle_ctouchpad(stream_input_t *input, const SDL_ControllerTo
         short scroll_x = touchpad_take_delta(&state->motion_remainder_x);
         short scroll_y = touchpad_take_delta(&state->motion_remainder_y);
         if (scroll_y != 0) {
-            LiSendHighResScrollEvent(scroll_y);
+            input->session->mlc->LiSendHighResScrollEvent(scroll_y);
         }
         if (scroll_x != 0) {
-            LiSendHighResHScrollEvent(scroll_x);
+            input->session->mlc->LiSendHighResHScrollEvent(scroll_x);
         }
         return;
     }
@@ -580,7 +593,7 @@ void stream_input_handle_ctouchpad(stream_input_t *input, const SDL_ControllerTo
     short dx = touchpad_take_delta(&state->motion_remainder_x);
     short dy = touchpad_take_delta(&state->motion_remainder_y);
     if (dx != 0 || dy != 0) {
-        LiSendMouseMoveEvent(dx, dy);
+        input->session->mlc->LiSendMouseMoveEvent(dx, dy);
     }
 }
 
@@ -608,13 +621,14 @@ void stream_input_update_touchpad_tap_hold(stream_input_t *input) {
                     timestamp,
                     finger->down_timestamp + TOUCHPAD_TAP_THRESHOLD_MS)) {
             state->tap_state = TOUCHPAD_TAP_SINGLE_HOLD;
-            LiSendMouseButtonEvent(BUTTON_ACTION_PRESS, BUTTON_LEFT);
+            input->session->mlc->LiSendMouseButtonEvent(BUTTON_ACTION_PRESS, BUTTON_LEFT);
         }
     }
 }
 
 void stream_input_handle_cdevice(stream_input_t *input, const SDL_ControllerDeviceEvent *event) {
-    app_gamepad_state_t *gamepad = app_input_gamepad_state_by_instance_id(input->input, event->which);
+    SDL_JoystickID instance_id = SDL_JoystickGetDeviceInstanceID(event->which);
+    app_gamepad_state_t *gamepad = app_input_gamepad_state_by_instance_id(input->input, instance_id);
     if (gamepad == NULL || !session_owns_gamepad(input->session, gamepad->gs_id)) {
         return;
     }
@@ -719,7 +733,7 @@ static bool touchpad_finger_exceeded_tap_slop(
 
 static void touchpad_end_tap(session_input_touchpad_t *state) {
     if (state->tap_state == TOUCHPAD_TAP_SINGLE_HOLD) {
-        LiSendMouseButtonEvent(BUTTON_ACTION_RELEASE, BUTTON_LEFT);
+        state->mlc->LiSendMouseButtonEvent(BUTTON_ACTION_RELEASE, BUTTON_LEFT);
     }
     state->tap_state = TOUCHPAD_TAP_NONE;
 }
@@ -746,12 +760,12 @@ static bool touchpad_settled(const session_input_touchpad_t *state) {
     return false;
 }
 
-static void touchpad_send_mouse_click(int mouse_button) {
+static void touchpad_send_mouse_click(stream_input_t *input, int mouse_button) {
     if (mouse_button == 0) {
         return;
     }
-    LiSendMouseButtonEvent(BUTTON_ACTION_PRESS, mouse_button);
-    LiSendMouseButtonEvent(BUTTON_ACTION_RELEASE, mouse_button);
+    input->session->mlc->LiSendMouseButtonEvent(BUTTON_ACTION_PRESS, mouse_button);
+    input->session->mlc->LiSendMouseButtonEvent(BUTTON_ACTION_RELEASE, mouse_button);
 }
 
 static short touchpad_take_delta(float *remainder) {
@@ -774,9 +788,11 @@ static session_input_touchpad_t *touchpad_state(
 static void touchpad_reset_state(session_input_touchpad_t *state) {
     touchpad_end_tap(state);
     if (state->physical_mouse_button > 0) {
-        LiSendMouseButtonEvent(BUTTON_ACTION_RELEASE, state->physical_mouse_button);
+        state->mlc->LiSendMouseButtonEvent(BUTTON_ACTION_RELEASE, state->physical_mouse_button);
     }
+    const mlc_api_t *mlc = state->mlc;
     SDL_memset(state, 0, sizeof(*state));
+    state->mlc = mlc;
 }
 
 static bool controller_has_touchpad(const app_gamepad_state_t *gamepad) {
@@ -866,14 +882,6 @@ static bool sensor_state_needs_update(const app_gamepad_sensor_state_t *state, u
         }
     }
     return false;
-}
-
-static bool vmouse_intercepted(stream_input_t *input, const app_gamepad_state_t *gamepad) {
-    if (!session_input_is_vmouse_active(&input->vmouse)) {
-        return false;
-    }
-    return gamepad->rightStickX != 0 || gamepad->rightStickY != 0 || gamepad->leftTrigger != 0 ||
-           gamepad->rightTrigger != 0;
 }
 
 static bool filter_deadzone_2axis(stream_input_t *input, short *x, short *y) {

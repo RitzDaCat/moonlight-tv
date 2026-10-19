@@ -1,3 +1,4 @@
+#include "stream/session_priv.h"
 #include "stream/input/session_input.h"
 
 void stream_input_handle_touch(const stream_input_t *input, const SDL_TouchFingerEvent *event) {
@@ -18,5 +19,5 @@ void stream_input_handle_touch(const stream_input_t *input, const SDL_TouchFinge
         default:
             return;
     }
-    LiSendTouchEvent(type, event->fingerId, event->x, event->y, event->pressure, 0, 0, 0);
+    input->session->mlc->LiSendTouchEvent(type, event->fingerId, event->x, event->y, event->pressure, 0, 0, 0);
 }

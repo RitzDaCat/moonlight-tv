@@ -6,6 +6,7 @@
 #include "lvgl/util/lv_app_utils.h"
 
 #include "app.h"
+#include "input/event_wait.h"
 #include "config.h"
 
 #include "logging.h"
@@ -133,7 +134,7 @@ void app_deinit(app_t *app) {
 void app_run_loop(app_t *app) {
     app_process_events(app);
     lv_task_handler();
-    SDL_Delay(1);
+    app_wait_for_input();
 }
 
 static int app_event_filter(void *userdata, SDL_Event *event) {
@@ -284,6 +285,9 @@ void app_process_events(app_t *app) {
     SDL_FilterEvents(app_event_filter, app);
     if (app->session != NULL) {
         session_update_touchpad_tap_hold(app->session);
+    }
+    if (app->split_session != NULL) {
+        session_update_touchpad_tap_hold(app->split_session);
     }
 }
 

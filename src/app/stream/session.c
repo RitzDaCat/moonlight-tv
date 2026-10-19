@@ -44,6 +44,9 @@ session_t *session_create(app_t *app, const CONFIGURATION *config, const SERVER_
     session->slot = slot;
     session->mlc = &mlc_slots[slot];
     session->split = split;
+    stream_audio_control_init(&session->audio_control,
+                              split ? config->split_audio_gain_db[slot] : 0,
+                              split && config->split_audio_muted[slot], split);
     if (split) {
         session_config_split(app, &session->config);
     }
@@ -377,8 +380,8 @@ static void populate_hdr_info_vui(SS4S_VideoHDRInfo *info, const STREAM_CONFIGUR
 }
 
 
-/* Each half of the screen shows one 1080p stream: a 4K panel gives it native pixels, and two 4K decodes would
- * exceed what the TV can do */
+/* Conservative prototype profile, pending independent per-player settings and
+ * concurrent decoder qualification. This is not a measured TV hardware limit. */
 static void session_config_split(app_t *app, session_config_t *config) {
     config->stream.width = 1920;
     config->stream.height = 1080;

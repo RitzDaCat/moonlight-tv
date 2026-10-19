@@ -7,5 +7,6 @@ void app_launch_param_free(app_launch_params_t *param) {
     if (param == NULL) {
         return;
     }
+    free(param->microphone_probe_device);
     free(param);
 }

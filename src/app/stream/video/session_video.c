@@ -82,6 +82,7 @@ int vdec_delegate_setup(int videoFormat, int width, int height, int redrawRate, 
     session = context;
     player = session->player;
     memset(&vdec_temp_stats, 0, sizeof(vdec_temp_stats));
+    vdec_temp_stats.measurementStartTimestamp = SDL_GetTicks();
     memset(&vdec_stream_info, 0, sizeof(vdec_stream_info));
     vdec_stream_format = videoFormat;
     vdec_stream_info.format = video_format_name(videoFormat);
@@ -200,7 +201,10 @@ int vdec_delegate_submit(PDECODE_UNIT decodeUnit) {
     vdec_temp_stats.totalFrames++;
 
     vdec_temp_stats.totalCaptureLatency += decodeUnit->frameHostProcessingLatency;
-    vdec_temp_stats.totalReassemblyTimeUs += (uint32_t) (decodeUnit->enqueueTimeUs - decodeUnit->receiveTimeUs);
+    if (decodeUnit->frameHostProcessingLatency > 0) {
+        vdec_temp_stats.hostLatencyFrames++;
+    }
+    vdec_temp_stats.totalReassemblyTimeUs += decodeUnit->enqueueTimeUs - decodeUnit->receiveTimeUs;
     vdec_stream_info.has_host_latency |= decodeUnit->frameHostProcessingLatency > 0;
     size_t length = 0;
     for (PLENTRY entry = decodeUnit->bufferList; entry != NULL; entry = entry->next) {
@@ -211,7 +215,9 @@ int vdec_delegate_submit(PDECODE_UNIT decodeUnit) {
     if (decodeUnit->frameType == FRAME_TYPE_IDR) {
         flags |= SS4S_VIDEO_FEED_DATA_KEYFRAME;
     }
+    uint64_t feedStartUs = LiGetMicroseconds();
     SS4S_VideoFeedResult result = SS4S_PlayerVideoFeed(player, buffer, length, flags);
+    uint64_t feedEndUs = LiGetMicroseconds();
     if (result == SS4S_VIDEO_FEED_OK) {
         if (vdec_stream_info.width == 0 || vdec_stream_info.height == 0) {
             stream_info_parse_size(decodeUnit, &vdec_stream_info);
@@ -219,7 +225,8 @@ int vdec_delegate_submit(PDECODE_UNIT decodeUnit) {
         // Both sides come from PltGetMicroseconds(), so they share an epoch. Limelight.h documents
         // neither that fact nor a supported way to age enqueueTimeUs, so re-check this subtraction
         // whenever moonlight-common-c is bumped: a different clock underflows it silently.
-        vdec_temp_stats.totalSubmitTimeUs += (uint32_t) (LiGetMicroseconds() - decodeUnit->enqueueTimeUs);
+        vdec_temp_stats.totalSubmitTimeUs += feedEndUs - decodeUnit->enqueueTimeUs;
+        vdec_temp_stats.totalFeedTimeUs += feedEndUs - feedStartUs;
         vdec_temp_stats.submittedFrames++;
         if (need_idr_on_resume) {
             // We dropped at least one frame while the decoder was in a
@@ -258,16 +265,18 @@ void vdec_stat_submit(const struct VIDEO_STATS *src, unsigned long now) {
     dst->receivedFps = (float) dst->receivedFrames / ((float) delta / 1000);
     dst->decodedFps = (float) dst->submittedFrames / ((float) delta / 1000);
     LiGetEstimatedRttInfo(&dst->rtt, &dst->rttVariance);
-    if (!streaming_stats_shown()) {
-        return;
-    }
-    int latencyUs = 0;
-    if (SS4S_PlayerGetVideoLatency(player, 0, &latencyUs)) {
-        dst->avgDecoderLatency = (float) latencyUs / 1000.0f;
-        vdec_stream_info.has_decoder_latency = true;
-    } else {
-        dst->avgDecoderLatency = 0;
-    }
+    dst->diagnostics = (SS4S_VideoDiagnostics) {
+            .completionLatencyUs = -1,
+            .renderQueueFrames = -1,
+            .estimatedQueueDelayUs = -1,
+    };
+    SS4S_PlayerGetVideoDiagnostics(player, 0, &dst->diagnostics);
+    vdec_stream_info.has_decoder_latency = dst->diagnostics.kind == SS4S_VIDEO_DIAGNOSTICS_COMPLETION &&
+                                          dst->diagnostics.completionLatencyUs >= 0;
+    dst->avgDecoderLatency = vdec_stream_info.has_decoder_latency
+                            ? (float) dst->diagnostics.completionLatencyUs / 1000.0f : 0;
+    session_stats_publish_video(&session->stats, dst, &vdec_stream_info);
+    /* Only the UI thread inspects overlay visibility and live LVGL objects. */
     app_bus_post(session->app, (bus_actionfunc) streaming_refresh_stats, NULL);
 }
 

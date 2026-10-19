@@ -17,10 +17,14 @@
 #include "refcounter.h"
 
 #include "res.h"
+#include "ui/tv_style.h"
 
 typedef struct memcache_key_t {
     int id;
+    uuidstr_t server_id;
     lv_coord_t target_width, target_height;
+    lv_coord_t caption_height;
+    bool backdrop;
 } memcache_key_t;
 
 typedef struct memcache_item_t {
@@ -36,6 +40,8 @@ typedef struct img_loader_req_t {
     int id;
     lv_obj_t *target;
     lv_coord_t target_width, target_height;
+    bool backdrop;
+    lv_coord_t caption_height;
     memcache_item_t *src;
     bool finished;
     SDL_Surface *cached;
@@ -103,6 +109,10 @@ static void coverloader_req_free(coverloader_req_t *req);
 static int reqlist_find_by_target(coverloader_req_t *p, const void *v);
 
 static bool cover_is_placeholder(const SDL_Surface *surface);
+static void display_cover(coverloader_t *loader, const uuidstr_t *uuid, int id, lv_obj_t *target,
+                          lv_coord_t width, lv_coord_t height, bool backdrop);
+static SDL_Surface *make_backdrop(SDL_Surface *source, int width, int height);
+static SDL_Surface *make_thumbnail(SDL_Surface *source, int width, int height, int caption_height);
 
 static void target_deleted_cb(lv_event_t *e);
 
@@ -177,6 +187,17 @@ void coverloader_unref(coverloader_t *loader) {
 
 void coverloader_display(coverloader_t *loader, const uuidstr_t *uuid, int id, lv_obj_t *target,
                          lv_coord_t target_width, lv_coord_t target_height) {
+    display_cover(loader, uuid, id, target, target_width, target_height, false);
+}
+
+void coverloader_display_backdrop(coverloader_t *loader, const uuidstr_t *uuid, int id, lv_obj_t *target,
+                                  lv_coord_t target_width, lv_coord_t target_height) {
+    display_cover(loader, uuid, id, target, target_width, target_height, true);
+}
+
+static void display_cover(coverloader_t *loader, const uuidstr_t *uuid, int id, lv_obj_t *target,
+                          lv_coord_t target_width, lv_coord_t target_height, bool backdrop) {
+    if (target_width <= 0 || target_height <= 0) return;
     coverloader_req_t *existing = reqlist_find_by(loader->reqlist, target, reqlist_find_by_target);
     if (existing && existing->task) {
         img_loader_cancel(loader->base_loader, existing->task);
@@ -189,6 +210,9 @@ void coverloader_display(coverloader_t *loader, const uuidstr_t *uuid, int id, l
     req->target = target;
     req->target_width = target_width;
     req->target_height = target_height;
+    req->backdrop = backdrop;
+    const appitem_viewholder_t *holder = lv_obj_get_user_data(target);
+    req->caption_height = !backdrop && holder->styles->show_title ? lv_obj_get_height(holder->title) : 0;
     req->finished = false;
     lv_obj_add_event_cb(target, target_deleted_cb, LV_EVENT_DELETE, req);
     loader->reqlist = reqlist_append(loader->reqlist, req);
@@ -220,8 +244,11 @@ static bool coverloader_memcache_get(coverloader_req_t *req) {
     memcache_key_t key;
     memset(&key, 0, sizeof(key));
     key.id = req->id;
+    key.server_id = req->server_id;
     key.target_width = req->target_width;
     key.target_height = req->target_height;
+    key.backdrop = req->backdrop;
+    key.caption_height = req->caption_height;
 
     (void) key.target_width;
     (void) key.target_height;
@@ -238,11 +265,14 @@ static void coverloader_memcache_put(coverloader_req_t *req) {
         return;
     }
     memcache_item_t *result = NULL;
-    memcache_key_t key = {
-            .id = req->id,
-            .target_width = req->target_width,
-            .target_height = req->target_height
-    };
+    memcache_key_t key;
+    memset(&key, 0, sizeof(key));
+    key.id = req->id;
+    key.server_id = req->server_id;
+    key.target_width = req->target_width;
+    key.target_height = req->target_height;
+    key.backdrop = req->backdrop;
+    key.caption_height = req->caption_height;
     lv_lru_get(req->loader->mem_cache, &key, sizeof(key), (void **) &result);
     if (result == NULL) {
         lv_draw_sdl_drv_param_t *param = lv_disp_get_default()->driver->user_data;
@@ -259,11 +289,10 @@ static void coverloader_memcache_put(coverloader_req_t *req) {
         if (SDL_ISPIXELFORMAT_ALPHA(cached->format->format)) {
             src->header.cf = LV_IMG_CF_TRUE_COLOR_ALPHA;
         }
-        int value_length = cached->w * cached->h;
+        size_t value_length = (size_t) cached->w * cached->h * sizeof(Uint32);
         if (cached->userdata) {
             subimage_info_t *info = cached->userdata;
             data->rect = info->rect;
-            value_length = info->w * info->h;
             src->header.w = info->w;
             src->header.h = info->h;
         } else {
@@ -318,6 +347,16 @@ static bool coverloader_filecache_get(coverloader_req_t *req) {
         }
         decoded = true_color;
     }
+    if (req->backdrop) {
+        req->cached = make_backdrop(decoded, req->target_width, req->target_height);
+        SDL_FreeSurface(decoded);
+        return req->cached != NULL;
+    }
+    if (req->target_width > req->target_height) {
+        req->cached = make_thumbnail(decoded, req->target_width, req->target_height, req->caption_height);
+        SDL_FreeSurface(decoded);
+        return req->cached != NULL;
+    }
     int sw = decoded->w, sh = decoded->h;
     while (sw > req->target_width * 1.5 || sh > req->target_height * 1.5) {
         sw /= 2;
@@ -368,6 +407,59 @@ static bool cover_is_placeholder(const SDL_Surface *surface) {
     return (surface->w == 130 && surface->h == 180) || (surface->w == 628 && surface->h == 888);
 }
 
+static SDL_Surface *make_thumbnail(SDL_Surface *source, int width, int height, int caption_height) {
+    SDL_Surface *result = SDL_CreateRGBSurfaceWithFormat(0, width, height, 32, SDL_PIXELFORMAT_RGB888);
+    if (!result) return NULL;
+    SDL_FillRect(result, NULL, SDL_MapRGB(result->format, 0x18, 0x21, 0x30));
+    int padding = LV_MAX(LV_MIN(width, height) / 24, 1);
+    int available_w = LV_MAX(width - 2 * padding, 1);
+    int available_h = LV_MAX(height - caption_height - 2 * padding, 1);
+    double scale = LV_MIN(available_w / (double) source->w, available_h / (double) source->h);
+    /* Upscaling a tiny icon cannot recover detail. Preserve its pixels instead. */
+    if (source->w < 256 && source->h < 256) scale = LV_MIN(scale, 1.0);
+    SDL_Rect destination = {.w=LV_MAX((int) (source->w * scale), 1),
+                            .h=LV_MAX((int) (source->h * scale), 1)};
+    destination.x = (width - destination.w) / 2;
+    destination.y = padding + (available_h - destination.h) / 2;
+    if (SDL_BlitScaled(source, NULL, result, &destination) < 0) {
+        SDL_FreeSurface(result);
+        return NULL;
+    }
+    return result;
+}
+
+static SDL_Surface *make_backdrop(SDL_Surface *source, int width, int height) {
+    SDL_Surface *result = SDL_CreateRGBSurfaceWithFormat(0, width, height, 32, SDL_PIXELFORMAT_RGB888);
+    if (!result) return NULL;
+    SDL_Rect crop = {0, 0, source->w, source->h};
+    if ((int64_t) source->w * height > (int64_t) source->h * width) {
+        crop.w = (int) ((int64_t) source->h * width / height);
+        crop.x = (source->w - crop.w) / 2;
+    } else {
+        crop.h = (int) ((int64_t) source->w * height / width);
+        crop.y = (source->h - crop.h) / 2;
+    }
+    if (crop.w <= 0 || crop.h <= 0 || SDL_BlitScaled(source, &crop, result, NULL) < 0) {
+        SDL_FreeSurface(result);
+        return NULL;
+    }
+    /* Prepare once on the image-loader worker, never per display frame. */
+    int fade_width = LV_MAX(width * 2 / 5, 1), fade_height = LV_MAX(height / 3, 1);
+    for (int y = 0; y < height; ++y) {
+        Uint32 *row = (Uint32 *) ((Uint8 *) result->pixels + y * result->pitch);
+        int bottom = LV_MIN(255, (height - 1 - y) * 255 / fade_height);
+        for (int x = 0; x < width; ++x) {
+            int alpha = LV_MIN(LV_MIN(255, x * 255 / fade_width), bottom) * 220 / 255;
+            Uint32 pixel = row[x];
+            int r = (((pixel >> 16) & 255) * alpha + 11 * (255 - alpha)) / 255;
+            int g = (((pixel >> 8) & 255) * alpha + 17 * (255 - alpha)) / 255;
+            int b = ((pixel & 255) * alpha + 27 * (255 - alpha)) / 255;
+            row[x] = (Uint32) (r << 16 | g << 8 | b);
+        }
+    }
+    return result;
+}
+
 static void coverloader_filecache_put(coverloader_req_t *req) {
     // This was done in fetch step
     (void) req;
@@ -415,7 +507,7 @@ static void img_loader_result_cb(coverloader_req_t *req) {
     lv_obj_remove_event_cb(req->target, target_deleted_cb);
     appitem_viewholder_t *holder = req->target->user_data;
     img_set_cover(req->target, req->src);
-    if (req->src) {
+    if (req->src && !holder->styles->show_title) {
         lv_obj_add_flag(holder->title, LV_OBJ_FLAG_HIDDEN);
     } else {
         lv_obj_clear_flag(holder->title, LV_OBJ_FLAG_HIDDEN);

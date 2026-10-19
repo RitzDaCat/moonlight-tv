@@ -3,6 +3,8 @@
 #include "util/i18n.h"
 #include "util/font.h"
 #include "hints.h"
+#include "app.h"
+#include "stream/audio/audio_control.h"
 
 #include "lvgl/ext/lv_child_group.h"
 #include "lvgl/theme/lv_theme_moonlight.h"
@@ -111,6 +113,7 @@ lv_obj_t *streaming_scene_create(lv_fragment_t *self, lv_obj_t *parent) {
 
     lv_obj_t *stats = lv_obj_create(overlay);
     lv_obj_remove_style_all(stats);
+    lv_obj_add_flag(stats, LV_OBJ_FLAG_EVENT_BUBBLE);
     lv_obj_set_style_text_color(stats, lv_color_white(), 0);
     lv_obj_set_style_pad_gap(stats, LV_DPX(5), 0);
     lv_obj_set_style_bg_color(stats, lv_color_black(), 0);
@@ -131,7 +134,11 @@ lv_obj_t *streaming_scene_create(lv_fragment_t *self, lv_obj_t *parent) {
     controller->stats_items.net_fps = stat_label(stats, "Network framerate");
     controller->stats_items.drop_rate = stat_label(stats, "Network frame drop");
     controller->stats_items.host_latency = stat_label(stats, "Host processing latency");
-    controller->stats_items.vdec_latency = stat_label(stats, "Decoder latency");
+    controller->stats_items.assembly_latency = stat_label(stats, "Frame assembly");
+    controller->stats_items.submit_latency = stat_label(stats, "Frame submission");
+    controller->stats_items.feed_latency = stat_label(stats, "Decoder feed call");
+    controller->stats_items.queue_latency = stat_label(stats, "Render queue (estimate)");
+    controller->stats_items.vdec_latency = stat_label(stats, "Decoder completion");
 
 
     lv_obj_add_flag(overlay, LV_OBJ_FLAG_HIDDEN);
@@ -143,6 +150,51 @@ lv_obj_t *streaming_scene_create(lv_fragment_t *self, lv_obj_t *parent) {
     controller->quit_btn = exit_btn;
     controller->suspend_btn = suspend_btn;
     controller->stats = stats;
+
+    if (controller->split) {
+        lv_obj_t *audio = lv_obj_create(overlay);
+        lv_obj_add_flag(audio, LV_OBJ_FLAG_EVENT_BUBBLE);
+        lv_obj_set_width(audio, video_w);
+        lv_obj_set_height(audio, LV_SIZE_CONTENT);
+        lv_obj_align(audio, LV_ALIGN_BOTTOM_LEFT, LV_DPX(20), -LV_DPX(100));
+        lv_obj_set_flex_flow(audio, LV_FLEX_FLOW_COLUMN);
+        lv_obj_clear_flag(audio, LV_OBJ_FLAG_SCROLLABLE);
+        lv_obj_set_style_bg_color(audio, lv_color_black(), 0);
+        lv_obj_set_style_bg_opa(audio, LV_OPA_80, 0);
+        lv_obj_t *title = lv_label_create(audio);
+        lv_label_set_text(title, locstr("Stream audio"));
+        for (int player = 0; player < 2; ++player) {
+            lv_obj_t *row = lv_obj_create(audio);
+            lv_obj_remove_style_all(row);
+            lv_obj_add_flag(row, LV_OBJ_FLAG_EVENT_BUBBLE);
+            lv_obj_set_size(row, LV_PCT(100), LV_DPX(50));
+            lv_obj_set_flex_flow(row, LV_FLEX_FLOW_ROW);
+            lv_obj_set_flex_align(row, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+            lv_obj_set_style_pad_gap(row, LV_DPX(15), 0);
+            lv_obj_t *name = lv_label_create(row);
+            lv_label_set_text(name, player == 0 ? locstr("Player 1") : locstr("Player 2"));
+            lv_obj_t *gain = lv_slider_create(row);
+            lv_obj_add_flag(gain, LV_OBJ_FLAG_EVENT_BUBBLE);
+            lv_slider_set_range(gain, STREAM_AUDIO_MIN_DB, STREAM_AUDIO_MAX_DB);
+            lv_slider_set_value(gain, app_configuration->split_audio_gain_db[player], LV_ANIM_OFF);
+            lv_obj_set_height(gain, LV_DPX(12));
+            lv_obj_set_flex_grow(gain, 1);
+            lv_group_add_obj(controller->group, gain);
+            lv_obj_t *value = lv_label_create(row);
+            lv_obj_set_width(value, LV_DPX(62));
+            lv_label_set_text_fmt(value, "%d dB", app_configuration->split_audio_gain_db[player]);
+            lv_obj_t *mute = lv_btn_create(row);
+            lv_obj_add_flag(mute, LV_OBJ_FLAG_EVENT_BUBBLE);
+            bool muted = app_configuration->split_audio_muted[player];
+            if (muted) lv_obj_add_state(mute, LV_STATE_CHECKED);
+            lv_obj_t *text = lv_label_create(mute);
+            lv_label_set_text(text, muted ? locstr("Unmute") : locstr("Mute"));
+            lv_group_add_obj(controller->group, mute);
+            controller->stream_audio[player].gain = gain;
+            controller->stream_audio[player].gain_label = value;
+            controller->stream_audio[player].muted = mute;
+        }
+    }
 
     streaming_overlay_resized(controller);
 
@@ -204,8 +256,9 @@ static lv_obj_t *overlay_title(lv_obj_t *parent, const char *title, streaming_co
     lv_obj_set_style_pad_hor(stats_title, LV_DPX(15), 0);
     lv_obj_set_style_pad_ver(stats_title, LV_DPX(10), 0);
     lv_obj_t *stats_pin = lv_btn_create(stats_title);
-    lv_group_remove_obj(stats_pin);
-    lv_obj_add_flag(stats_pin, LV_OBJ_FLAG_CHECKABLE);
+    lv_group_add_obj(controller->group, stats_pin);
+    lv_obj_add_flag(stats_pin, LV_OBJ_FLAG_EVENT_BUBBLE);
+    lv_obj_add_flag(stats_title, LV_OBJ_FLAG_EVENT_BUBBLE);
     lv_obj_set_style_bg_color(stats_pin, lv_color_black(), 0);
     lv_obj_set_style_bg_opa(stats_pin, LV_OPA_20, 0);
     lv_obj_set_style_pad_all(stats_pin, 0, 0);

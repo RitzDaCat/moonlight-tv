@@ -25,7 +25,7 @@ lv_obj_t *appitem_view(appitem_styles_t *styles, lv_coord_t width, lv_coord_t he
     lv_obj_set_style_transform_pivot_y(item, height / 2, 0);
 
     lv_obj_set_style_transform_zoom(item, 256 * 99 / 100, LV_STATE_PRESSED);
-    lv_obj_set_style_transform_zoom(item, 256 * 102 / 100, LV_STATE_FOCUS_KEY);
+    lv_obj_set_style_transform_zoom(item, 256, LV_STATE_FOCUS_KEY);
     lv_obj_set_style_transition(item, &styles->tr_pressed, LV_STATE_PRESSED | LV_STATE_FOCUS_KEY);
     lv_obj_set_style_transition(item, &styles->tr_released, LV_STATE_DEFAULT);
     lv_obj_add_event_cb(item, appitem_draw_decor, LV_EVENT_DRAW_MAIN, styles);
@@ -42,10 +42,12 @@ lv_obj_t *appitem_view(appitem_styles_t *styles, lv_coord_t width, lv_coord_t he
     const lv_font_t *font = lv_theme_get_font_small(item);
     lv_obj_set_style_text_font(title, font, 0);
     lv_obj_set_size(title, LV_PCT(100), lv_obj_get_style_text_font(title, 0)->line_height + LV_DPX(2));
-    lv_obj_set_style_text_align(title, LV_TEXT_ALIGN_CENTER, 0);
+    lv_obj_set_style_text_align(title, LV_TEXT_ALIGN_LEFT, 0);
     lv_label_set_long_mode(title, LV_LABEL_LONG_DOT);
-    lv_obj_set_style_pad_hor(title, LV_DPX(5), 0);
-    lv_obj_align(title, LV_ALIGN_BOTTOM_MID, 0, -lv_dpx(20));
+    lv_obj_set_style_pad_hor(title, LV_DPX(8), 0);
+    lv_obj_set_style_bg_color(title, lv_color_hex(0x0b111b), 0);
+    lv_obj_set_style_bg_opa(title, LV_OPA_80, 0);
+    lv_obj_align(title, LV_ALIGN_BOTTOM_MID, 0, 0);
 
     appitem_viewholder_t *holder = (appitem_viewholder_t *) malloc(sizeof(appitem_viewholder_t));
     memset(holder, 0, sizeof(appitem_viewholder_t));
@@ -61,10 +63,10 @@ lv_obj_t *appitem_view(appitem_styles_t *styles, lv_coord_t width, lv_coord_t he
 void appitem_style_init(appitem_styles_t *style) {
     lv_style_init(&style->cover);
     lv_style_set_pad_all(&style->cover, 0);
-    lv_style_set_radius(&style->cover, LV_DPX(2));
+    lv_style_set_radius(&style->cover, LV_DPX(5));
     lv_style_set_clip_corner(&style->cover, true);
-    lv_style_set_shadow_opa(&style->cover, LV_OPA_40);
-    lv_style_set_shadow_width(&style->cover, LV_DPX(15));
+    lv_style_set_shadow_opa(&style->cover, LV_OPA_TRANSP);
+    lv_style_set_shadow_width(&style->cover, 0);
     lv_style_set_shadow_ofs_y(&style->cover, LV_DPX(3));
     lv_style_set_outline_color(&style->cover, lv_color_lighten(lv_palette_main(LV_PALETTE_BLUE), 30));
     lv_style_set_outline_width(&style->cover, LV_DPX(2));

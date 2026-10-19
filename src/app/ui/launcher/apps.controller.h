@@ -14,6 +14,7 @@ typedef struct {
     lv_style_transition_dsc_t tr_released;
     lv_img_dsc_t fav_indicator_src;
     lv_img_dsc_t defcover_src;
+    bool show_title;
 } appitem_styles_t;
 
 
@@ -37,6 +38,10 @@ typedef struct {
     lv_obj_t *applist, *appload, *apperror;
     lv_obj_t *errortitle, *errorhint, *errordetail;
     lv_obj_t *actions;
+    lv_obj_t *hero, *hero_image, *hero_title, *hero_subtitle;
+    lv_obj_t *launch_btn, *launch_label, *options_btn, *shelf_title;
+    int featured_id;
+    appitem_styles_t hero_style;
 
     lv_obj_t *quit_progress;
 
@@ -61,3 +66,5 @@ typedef struct {
 } apps_fragment_arg_t;
 
 extern const lv_fragment_class_t apps_controller_class;
+
+void apps_focus_primary(apps_fragment_t *controller);

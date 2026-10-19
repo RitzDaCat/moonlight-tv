@@ -3,8 +3,22 @@
 #include "stream/session.h"
 #include "logging.h"
 
+bool app_session_split_supported(const app_t *app) {
+    const unsigned required = SS4S_VIDEO_CAP_TRANSFORM_AREA_DEST | SS4S_VIDEO_CAP_TRANSFORM_MULTI_INSTANCE;
+    return (app->ss4s.video_cap.transform & required) == required;
+}
+
 int app_session_begin(app_t *app, const uuidstr_t *uuid, const APP_LIST *gs_app, const uuidstr_t *split_uuid,
                       const APP_LIST *split_app) {
+    if (uuid == NULL || gs_app == NULL ||
+        (split_uuid != NULL && (split_app == NULL || uuidstr_t_equals_t(uuid, split_uuid)))) {
+        commons_log_error("App", "Split screen requires two distinct computers and a game for each");
+        return -1;
+    }
+    if (split_uuid != NULL && !app_session_split_supported(app)) {
+        commons_log_error("App", "Selected decoder does not support simultaneous split-screen streams");
+        return -1;
+    }
     if (app->session != NULL) {
         commons_log_error("App", "Session already exists");
         return -1;

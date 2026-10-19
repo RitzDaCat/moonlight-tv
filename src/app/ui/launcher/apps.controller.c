@@ -21,6 +21,14 @@
 #include "util/i18n.h"
 #include "pair.dialog.h"
 #include "ui/common/progress_dialog.h"
+#include "ui/tv_style.h"
+
+static void featured_click(lv_event_t *event);
+static void featured_options(lv_event_t *event);
+static void featured_key(lv_event_t *event);
+static void shelf_key(lv_event_t *event);
+static void shelf_focused(lv_event_t *event);
+static void set_featured(apps_fragment_t *controller, int app_id);
 
 typedef void (*action_cb_t)(apps_fragment_t *controller, lv_obj_t *buttons, uint16_t index);
 
@@ -163,11 +171,16 @@ static void apps_controller_ctor(lv_fragment_t *self, void *args) {
     controller->apploader = apploader_create(arg->global, &controller->uuid, &controller->apploader_cb, controller);
 
     appitem_style_init(&controller->appitem_style);
+    controller->appitem_style.show_title = true;
+    appitem_style_init(&controller->hero_style);
+    lv_style_set_radius(&controller->hero_style.cover, 0);
+    lv_style_set_outline_width(&controller->hero_style.cover, 0);
 }
 
 static void apps_controller_dtor(lv_fragment_t *self) {
     apps_fragment_t *fragment = (apps_fragment_t *) self;
     appitem_style_deinit(&fragment->appitem_style);
+    appitem_style_deinit(&fragment->hero_style);
     apploader_destroy(fragment->apploader);
     if (fragment->apploader_apps != NULL) {
         apploader_list_free(fragment->apploader_apps);
@@ -178,63 +191,135 @@ static lv_obj_t *apps_view(lv_fragment_t *self, lv_obj_t *container) {
     apps_fragment_t *controller = (apps_fragment_t *) self;
     lv_obj_t *view = lv_obj_create(container);
     lv_obj_remove_style_all(view);
+    tv_surface(view, TV_BACKGROUND);
     lv_obj_add_flag(view, LV_OBJ_FLAG_EVENT_BUBBLE);
     lv_obj_set_size(view, LV_PCT(100), LV_PCT(100));
     lv_obj_set_scroll_dir(view, LV_DIR_NONE);
+
+    lv_obj_t *hero = controller->hero = lv_obj_create(view);
+    lv_obj_remove_style_all(hero);
+    lv_obj_clear_flag(hero, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_add_flag(hero, LV_OBJ_FLAG_EVENT_BUBBLE);
+    lv_obj_set_size(hero, LV_PCT(100), LV_PCT(64));
+
+    lv_obj_t *art = controller->hero_image = appitem_view(&controller->hero_style, 1, 1, hero);
+    lv_obj_clear_flag(art, LV_OBJ_FLAG_CLICKABLE | LV_OBJ_FLAG_EVENT_BUBBLE | LV_OBJ_FLAG_SCROLL_ON_FOCUS);
+    lv_obj_set_size(art, LV_PCT(66), LV_PCT(100));
+    lv_obj_align(art, LV_ALIGN_TOP_RIGHT, 0, 0);
+    appitem_viewholder_t *art_holder = lv_obj_get_user_data(art);
+    lv_obj_add_flag(art_holder->play_indicator, LV_OBJ_FLAG_HIDDEN);
+    lv_label_set_text_static(art_holder->title, "");
+
+    lv_obj_t *feature = lv_obj_create(hero);
+    lv_obj_remove_style_all(feature);
+    lv_obj_clear_flag(feature, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_add_flag(feature, LV_OBJ_FLAG_EVENT_BUBBLE);
+    lv_obj_set_pos(feature, LV_DPX(32), LV_DPX(64));
+    lv_obj_set_size(feature, LV_PCT(57), LV_SIZE_CONTENT);
+    lv_obj_set_flex_flow(feature, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_style_pad_row(feature, LV_DPX(12), 0);
+    controller->hero_title = lv_label_create(feature);
+    lv_obj_set_width(controller->hero_title, LV_PCT(100));
+    lv_label_set_long_mode(controller->hero_title, LV_LABEL_LONG_DOT);
+    lv_obj_set_style_text_font(controller->hero_title, controller->global->ui.fonts.fonts.display, 0);
+    lv_label_set_text(controller->hero_title, locstr("Your games, on the big screen"));
+    controller->hero_subtitle = lv_label_create(feature);
+    lv_obj_set_width(controller->hero_subtitle, LV_PCT(100));
+    lv_label_set_long_mode(controller->hero_subtitle, LV_LABEL_LONG_DOT);
+    lv_obj_set_style_text_color(controller->hero_subtitle, lv_color_hex(TV_MUTED), 0);
+    lv_label_set_text_static(controller->hero_subtitle, "");
+
+    lv_obj_t *primary_actions = lv_obj_create(feature);
+    lv_obj_remove_style_all(primary_actions);
+    lv_obj_add_flag(primary_actions, LV_OBJ_FLAG_EVENT_BUBBLE);
+    lv_obj_set_size(primary_actions, LV_PCT(100), LV_DPX(46));
+    lv_obj_set_style_pad_all(primary_actions, LV_DPX(4), 0);
+    lv_obj_set_style_pad_column(primary_actions, LV_DPX(16), 0);
+    lv_obj_set_flex_flow(primary_actions, LV_FLEX_FLOW_ROW);
+    lv_obj_t *launch = controller->launch_btn = lv_btn_create(primary_actions);
+    lv_obj_set_size(launch, LV_DPX(190), LV_PCT(100));
+    lv_obj_add_flag(launch, LV_OBJ_FLAG_EVENT_BUBBLE);
+    lv_obj_set_style_bg_color(launch, lv_color_hex(0x299bfa), 0);
+    lv_obj_set_style_text_color(launch, lv_color_hex(0x06101a), 0);
+    lv_obj_set_style_radius(launch, LV_DPX(6), 0);
+    lv_obj_set_style_shadow_width(launch, 0, 0);
+    tv_focus_style(launch);
+    lv_obj_set_style_outline_color(launch, lv_color_white(), LV_STATE_FOCUS_KEY);
+    controller->launch_label = lv_label_create(launch);
+    lv_label_set_text_static(controller->launch_label, locstr("Launch game"));
+    lv_obj_center(controller->launch_label);
+    lv_obj_add_event_cb(launch, featured_click, LV_EVENT_CLICKED, controller);
+    lv_obj_add_event_cb(launch, featured_key, LV_EVENT_KEY, controller);
+
+    lv_obj_t *options = controller->options_btn = lv_btn_create(primary_actions);
+    lv_obj_add_flag(options, LV_OBJ_FLAG_EVENT_BUBBLE);
+    lv_obj_set_size(options, LV_SIZE_CONTENT, LV_PCT(100));
+    lv_obj_set_style_bg_opa(options, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_shadow_width(options, 0, 0);
+    lv_obj_set_style_text_color(options, lv_color_hex(TV_MUTED), 0);
+    tv_focus_style(options);
+    lv_obj_t *options_label = lv_label_create(options);
+    lv_label_set_text_static(options_label, locstr("Game options"));
+    lv_obj_center(options_label);
+    lv_obj_add_event_cb(options, featured_options, LV_EVENT_CLICKED, controller);
+    lv_obj_add_event_cb(options, featured_key, LV_EVENT_KEY, controller);
+
+    controller->shelf_title = lv_label_create(view);
+    lv_label_set_text_static(controller->shelf_title, locstr("Games & apps"));
+    lv_obj_set_style_text_font(controller->shelf_title, lv_theme_get_font_large(view), 0);
+    lv_obj_set_pos(controller->shelf_title, LV_DPX(32), LV_PCT(58));
 
     lv_obj_t *applist = controller->applist = lv_gridview_create(view);
     lv_obj_add_flag(applist, LV_OBJ_FLAG_EVENT_BUBBLE);
     lv_obj_set_scroll_dir(applist, LV_DIR_VER);
     lv_obj_set_scrollbar_mode(applist, LV_SCROLLBAR_MODE_ACTIVE);
-    lv_obj_set_style_pad_all(applist, lv_dpx(24), 0);
-    lv_obj_set_style_pad_gap(applist, lv_dpx(24), 0);
+    lv_obj_set_style_pad_hor(applist, LV_DPX(32), 0);
+    lv_obj_set_style_pad_ver(applist, LV_DPX(7), 0);
+    lv_obj_set_style_pad_gap(applist, LV_DPX(12), 0);
     lv_obj_set_style_radius(applist, 0, 0);
-    lv_obj_set_style_border_side(applist, LV_BORDER_SIDE_NONE, 0);
-    lv_obj_set_style_bg_opa(applist, 0, 0);
-    lv_obj_set_size(applist, LV_PCT(100), LV_PCT(100));
-    lv_obj_update_layout(applist);
-
+    lv_obj_set_style_border_width(applist, 0, 0);
+    lv_obj_set_style_bg_opa(applist, LV_OPA_TRANSP, 0);
+    lv_obj_set_pos(applist, 0, LV_PCT(63));
+    lv_obj_set_size(applist, LV_PCT(100), LV_PCT(37));
     lv_gridview_set_adapter(applist, &apps_adapter);
+    lv_obj_add_event_cb(applist, shelf_key, LV_EVENT_KEY, controller);
+    lv_obj_add_event_cb(applist, shelf_focused, LV_EVENT_FOCUSED, controller);
+
     lv_obj_t *appload = controller->appload = lv_spinner_create(view, 1000, 60);
     launcher_fragment_t *parent_controller = (launcher_fragment_t *) lv_fragment_get_parent(&controller->base);
     lv_group_add_obj(parent_controller->detail_group, appload);
     lv_obj_add_flag(appload, LV_OBJ_FLAG_EVENT_BUBBLE);
-    lv_obj_set_size(appload, lv_dpx(60), lv_dpx(60));
+    lv_obj_set_size(appload, LV_DPX(45), LV_DPX(45));
     lv_obj_center(appload);
 
     lv_obj_t *apperror = controller->apperror = lv_obj_create(view);
     lv_obj_add_flag(apperror, LV_OBJ_FLAG_EVENT_BUBBLE);
-    lv_obj_set_size(apperror, LV_PCT(80), LV_PCT(60));
+    lv_obj_set_size(apperror, LV_PCT(75), LV_PCT(58));
     lv_obj_center(apperror);
+    tv_surface(apperror, TV_BACKGROUND);
     lv_obj_set_flex_flow(apperror, LV_FLEX_FLOW_COLUMN);
-    lv_obj_set_flex_align(apperror, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_END, LV_FLEX_ALIGN_CENTER);
-    lv_obj_t *errortitle = controller->errortitle = lv_label_create(apperror);
-    lv_obj_set_width(errortitle, LV_PCT(100));
-    lv_obj_set_style_text_font(errortitle, lv_theme_get_font_large(apperror), 0);
-    lv_obj_t *errorlabel = controller->errorhint = lv_label_create(apperror);
-    lv_obj_set_width(errorlabel, LV_PCT(100));
-    lv_obj_t *errordetail = controller->errordetail = lv_label_create(apperror);
-    lv_obj_set_style_border_width(errordetail, LV_DPX(2), 0);
-    lv_obj_set_style_border_opa(errordetail, LV_OPA_50, 0);
-    lv_obj_set_style_border_color(errordetail, lv_palette_main(LV_PALETTE_BLUE_GREY), 0);
-    lv_obj_set_style_pad_all(errordetail, LV_DPX(10), 0);
-    lv_obj_set_style_radius(errordetail, LV_DPX(20), 0);
-    lv_obj_set_width(errordetail, LV_PCT(100));
-    lv_obj_set_flex_grow(errordetail, 1);
+    lv_obj_set_flex_align(apperror, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START);
+    lv_obj_set_style_pad_row(apperror, LV_DPX(16), 0);
+    controller->errortitle = lv_label_create(apperror);
+    lv_obj_set_width(controller->errortitle, LV_PCT(100));
+    lv_obj_set_style_text_font(controller->errortitle, controller->global->ui.fonts.fonts.display, 0);
+    controller->errorhint = lv_label_create(apperror);
+    lv_obj_set_width(controller->errorhint, LV_PCT(100));
+    lv_obj_set_style_text_color(controller->errorhint, lv_color_hex(TV_MUTED), 0);
+    controller->errordetail = lv_label_create(apperror);
+    lv_obj_set_width(controller->errordetail, LV_PCT(100));
+    lv_obj_set_style_text_font(controller->errordetail, lv_theme_get_font_small(view), 0);
+    lv_obj_set_flex_grow(controller->errordetail, 1);
 
     lv_obj_t *actions = controller->actions = lv_btnmatrix_create(apperror);
-    lv_obj_set_style_outline_width(actions, 0, 0);
-    lv_obj_set_style_outline_width(actions, 0, LV_STATE_FOCUS_KEY);
-    lv_obj_set_style_pad_all(actions, LV_DPX(5), LV_STATE_FOCUS_KEY);
-    lv_obj_set_style_border_side(actions, LV_BORDER_SIDE_NONE, 0);
-    const lv_font_t *font = lv_obj_get_style_text_font(actions, LV_PART_ITEMS);
-    lv_obj_set_height(actions, lv_font_get_line_height(font) + LV_DPI_DEF / 10 + LV_DPX(5) * 2);
+    lv_obj_set_style_border_width(actions, 0, 0);
+    lv_obj_set_style_bg_opa(actions, LV_OPA_TRANSP, 0);
+    lv_obj_set_height(actions, LV_DPX(44));
     lv_obj_set_style_max_width(actions, LV_PCT(100), 0);
     lv_obj_add_flag(actions, LV_OBJ_FLAG_EVENT_BUBBLE);
+    tv_focus_style(actions);
     lv_btnmatrix_set_btn_ctrl_all(actions, LV_BTNMATRIX_CTRL_CLICK_TRIG | LV_BTNMATRIX_CTRL_NO_REPEAT);
-
     set_actions(controller, actions_apps_none, NULL);
-
     return view;
 }
 
@@ -276,18 +361,24 @@ static void update_grid_config(apps_fragment_t *controller) {
     lv_obj_t *applist = controller->applist;
     lv_obj_update_layout(applist);
     lv_coord_t applist_width = lv_obj_get_width(applist);
-    int col_count = LV_CLAMP(2, applist_width / lv_dpx(120), 5);
+    int col_count = LV_CLAMP(1, applist_width / lv_dpx(210), 4);
     lv_coord_t col_width = (applist_width - lv_obj_get_style_pad_left(applist, 0) -
                             lv_obj_get_style_pad_right(applist, 0) -
                             lv_obj_get_style_pad_column(applist, 0) * (col_count - 1)) / col_count;
     controller->col_count = col_count;
     controller->col_width = col_width;
-    lv_coord_t row_height = col_width / 3 * 4;
+    lv_coord_t row_height = col_width * 9 / 16;
     controller->col_height = row_height;
     lv_gridview_set_config(applist, col_count, row_height, LV_GRID_ALIGN_CENTER, LV_GRID_ALIGN_CENTER);
 
     controller->appitem_style.defcover_src.header.w = col_width;
     controller->appitem_style.defcover_src.header.h = row_height;
+    lv_obj_update_layout(controller->hero_image);
+    controller->hero_style.defcover_src.header.w = lv_obj_get_width(controller->hero_image);
+    controller->hero_style.defcover_src.header.h = lv_obj_get_height(controller->hero_image);
+    int selected = controller->featured_id;
+    controller->featured_id = 0;
+    set_featured(controller, selected);
 }
 
 static void on_destroy_view(lv_fragment_t *self, lv_obj_t *view) {
@@ -403,7 +494,13 @@ static void update_view_state(apps_fragment_t *controller) {
                 }
                 case APPLOADER_STATE_IDLE: {
                     // has apps
-                    show_ok(controller);
+                    if (adapter_item_count(controller->applist, controller->apploader_apps) > 0) {
+                        show_ok(controller);
+                    } else {
+                        show_error(controller, locstr("No apps yet"),
+                                   locstr("Add games or apps on your computer, then choose Retry."), NULL);
+                        set_actions(controller, action_labels_error, action_callbacks_error);
+                    }
                     break;
                 }
             }
@@ -452,6 +549,8 @@ static void update_view_state(apps_fragment_t *controller) {
 }
 
 static void show_progress(apps_fragment_t *fragment) {
+    lv_obj_add_flag(fragment->hero, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_add_flag(fragment->shelf_title, LV_OBJ_FLAG_HIDDEN);
     lv_obj_add_flag(fragment->applist, LV_OBJ_FLAG_HIDDEN);
     lv_obj_add_flag(fragment->apperror, LV_OBJ_FLAG_HIDDEN);
     lv_obj_clear_flag(fragment->appload, LV_OBJ_FLAG_HIDDEN);
@@ -468,13 +567,20 @@ static void show_ok(apps_fragment_t *fragment) {
     lv_obj_add_flag(fragment->appload, LV_OBJ_FLAG_HIDDEN);
     lv_obj_add_flag(fragment->actions, LV_OBJ_FLAG_HIDDEN);
     lv_obj_add_state(fragment->actions, LV_STATE_DISABLED);
-
-    if (lv_group_get_focused(lv_obj_get_group(fragment->applist)) != fragment->applist) {
-        lv_group_focus_obj(fragment->applist);
+    lv_obj_clear_flag(fragment->hero, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_clear_flag(fragment->shelf_title, LV_OBJ_FLAG_HIDDEN);
+    set_featured(fragment, fragment->featured_id);
+    launcher_fragment_t *parent = (launcher_fragment_t *) lv_fragment_get_parent(&fragment->base);
+    lv_obj_t *focused = lv_group_get_focused(parent->detail_group);
+    if (app_input_get_group(&fragment->global->ui.input) == parent->detail_group &&
+        (focused == fragment->appload || focused == fragment->actions || !focused)) {
+        apps_focus_primary(fragment);
     }
 }
 
 static void show_error(apps_fragment_t *fragment, const char *title, const char *hint, const char *detail) {
+    lv_obj_add_flag(fragment->hero, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_add_flag(fragment->shelf_title, LV_OBJ_FLAG_HIDDEN);
     lv_obj_add_flag(fragment->appload, LV_OBJ_FLAG_HIDDEN);
     lv_obj_clear_flag(fragment->apperror, LV_OBJ_FLAG_HIDDEN);
     lv_obj_add_flag(fragment->applist, LV_OBJ_FLAG_HIDDEN);
@@ -484,6 +590,7 @@ static void show_error(apps_fragment_t *fragment, const char *title, const char 
     lv_obj_set_style_opa(fragment->errordetail, detail ? LV_OPA_100 : LV_OPA_0, 0);
     lv_label_set_text_static(fragment->errortitle, title);
     lv_label_set_text_static(fragment->errorhint, hint);
+    lv_label_set_text(fragment->errordetail, detail ? detail : "");
 }
 
 static void appload_started(void *userdata) {
@@ -507,6 +614,7 @@ static void appload_loaded(apploader_list_t *apps, void *userdata) {
     }
     apploader_list_free(fragment->apploader_apps);
     fragment->apploader_apps = apps;
+    set_featured(fragment, fragment->featured_id);
     update_view_state(fragment);
 
     if (fragment->def_app > 0 && !fragment->def_app_launched) {
@@ -645,14 +753,105 @@ static void adapter_bind_view(lv_obj_t *grid, lv_obj_t *item_view, void *data, i
 static void applist_focus_enter(lv_event_t *event) {
     if (event->target != event->current_target) { return; }
     apps_fragment_t *controller = lv_event_get_user_data(event);
+    if (!controller->base.managed || controller->base.managed->destroying_obj) return;
     lv_gridview_focus(controller->applist, controller->focus_backup);
 }
 
 static void applist_focus_leave(lv_event_t *event) {
     if (event->target != event->current_target) { return; }
     apps_fragment_t *controller = lv_event_get_user_data(event);
+    if (!controller->base.managed || controller->base.managed->destroying_obj) return;
     controller->focus_backup = lv_gridview_get_focused_index(controller->applist);
     lv_gridview_focus(controller->applist, -1);
+}
+
+void apps_focus_primary(apps_fragment_t *controller) {
+    lv_obj_t *target = controller->launch_btn;
+    if (!lv_obj_has_flag(controller->apperror, LV_OBJ_FLAG_HIDDEN)) target = controller->actions;
+    else if (!lv_obj_has_flag(controller->appload, LV_OBJ_FLAG_HIDDEN)) target = controller->appload;
+    else if (lv_obj_has_state(target, LV_STATE_DISABLED)) target = controller->options_btn;
+    lv_group_focus_obj(target);
+    lv_obj_add_state(target, LV_STATE_FOCUS_KEY);
+}
+
+static void set_featured(apps_fragment_t *controller, int app_id) {
+    if (!controller->base.managed || controller->base.managed->destroying_obj ||
+        !controller->base.managed->obj_created) return;
+    const apploader_item_t *app = controller->apploader_apps ?
+            apploader_list_item_by_id(controller->apploader_apps, app_id) : NULL;
+    if (!app || (app->hidden && !controller->show_hidden_apps)) {
+        int count = adapter_item_count(controller->applist, controller->apploader_apps);
+        if (count <= 0) return;
+        app = &controller->apploader_apps->items[0];
+    }
+    lv_label_set_text(controller->hero_title, app->base.name);
+    const pclist_t *host = pcmanager_node(pcmanager, &controller->uuid);
+    lv_label_set_text_fmt(controller->hero_subtitle, locstr("Stream from %s"),
+                         host && host->server ? host->server->hostname : "");
+    int current = pcmanager_server_current_app(pcmanager, &controller->uuid);
+    lv_label_set_text_static(controller->launch_label,
+                            current == app->base.id ? locstr("Resume game") : locstr("Launch game"));
+    if (current && current != app->base.id) lv_obj_add_state(controller->launch_btn, LV_STATE_DISABLED);
+    else lv_obj_clear_state(controller->launch_btn, LV_STATE_DISABLED);
+    if (controller->featured_id == app->base.id || !controller->coverloader) return;
+    controller->featured_id = app->base.id;
+    lv_coord_t width = lv_obj_get_width(controller->hero_image);
+    lv_coord_t height = lv_obj_get_height(controller->hero_image);
+    coverloader_display_backdrop(controller->coverloader, &controller->uuid, app->base.id,
+                                 controller->hero_image, width, height);
+}
+
+static void featured_click(lv_event_t *event) {
+    apps_fragment_t *controller = lv_event_get_user_data(event);
+    const apploader_item_t *app = apploader_list_item_by_id(controller->apploader_apps, controller->featured_id);
+    int running = pcmanager_server_current_app(pcmanager, &controller->uuid);
+    if (!app || (running && running != app->base.id)) return;
+    launcher_launch_game(controller, app);
+}
+
+static void featured_options(lv_event_t *event) {
+    apps_fragment_t *controller = lv_event_get_user_data(event);
+    if (!controller->featured_id) return;
+    appitem_viewholder_t holder = {.app_id = controller->featured_id};
+    open_context_menu(controller, &holder);
+}
+
+static void featured_key(lv_event_t *event) {
+    apps_fragment_t *controller = lv_event_get_user_data(event);
+    uint32_t key = lv_event_get_key(event);
+    lv_obj_t *target = lv_event_get_target(event);
+    if (key == LV_KEY_DOWN) {
+        lv_group_focus_obj(controller->applist);
+        lv_gridview_focus(controller->applist, controller->focus_backup);
+    } else if (key == LV_KEY_UP) {
+        launcher_focus_navigation((launcher_fragment_t *) lv_fragment_get_parent(&controller->base));
+    } else if (key == LV_KEY_RIGHT && target == controller->launch_btn) {
+        lv_group_focus_obj(controller->options_btn);
+    } else if (key == LV_KEY_LEFT && target == controller->options_btn) {
+        if (!lv_obj_has_state(controller->launch_btn, LV_STATE_DISABLED)) lv_group_focus_obj(controller->launch_btn);
+    } else if (key == LV_KEY_DEL) {
+        featured_options(event);
+    }
+}
+
+static void shelf_key(lv_event_t *event) {
+    apps_fragment_t *controller = lv_event_get_user_data(event);
+    if (lv_event_get_target(event) != controller->applist) return;
+    uint32_t key = lv_event_get_key(event);
+    if (key == LV_KEY_UP) {
+        apps_focus_primary(controller);
+        lv_event_stop_processing(event);
+    } else if (key == LV_KEY_DEL) {
+        featured_options(event);
+    }
+}
+
+static void shelf_focused(lv_event_t *event) {
+    apps_fragment_t *controller = lv_event_get_user_data(event);
+    lv_obj_t *item = lv_event_get_target(event);
+    if (lv_obj_get_parent(item) != controller->applist) return;
+    const appitem_viewholder_t *holder = lv_obj_get_user_data(item);
+    if (holder) set_featured(controller, holder->app_id);
 }
 
 static void quitgame_cb(int result, const char *error, const uuidstr_t *uuid, void *userdata) {
@@ -710,7 +909,8 @@ static void open_context_menu(apps_fragment_t *fragment, appitem_viewholder_t *h
     const apploader_item_t *app = apploader_list_item_by_id(fragment->apploader_apps, holder->app_id);
     assert(app != NULL);
     lv_obj_t *msgbox = lv_msgbox_create(NULL, app->base.name, NULL, NULL, false);
-    lv_obj_set_user_data(msgbox, (void *) holder);
+    /* A menu can outlive the recycled shelf item (or a temporary featured holder). */
+    lv_obj_set_user_data(msgbox, (void *) (intptr_t) holder->app_id);
     lv_obj_t *content = lv_msgbox_get_content(msgbox);
     lv_obj_add_flag(content, LV_OBJ_FLAG_EVENT_BUBBLE);
     lv_obj_set_flex_flow(content, LV_FLEX_FLOW_COLUMN);
@@ -761,9 +961,12 @@ static void context_menu_click_cb(lv_event_t *e) {
     if (target->parent != current_target) { return; }
     lv_obj_t *mbox = lv_event_get_current_target(e)->parent;
     apps_fragment_t *self = lv_event_get_user_data(e);
-    appitem_viewholder_t *holder = lv_obj_get_user_data(mbox);
-    const apploader_item_t *app = apploader_list_item_by_id(self->apploader_apps, holder->app_id);
-    assert(app != NULL);
+    int app_id = (int) (intptr_t) lv_obj_get_user_data(mbox);
+    const apploader_item_t *app = apploader_list_item_by_id(self->apploader_apps, app_id);
+    if (!app) {
+        lv_msgbox_close_async(mbox);
+        return;
+    }
     if (lv_obj_get_user_data(target) == launcher_quit_game) {
         launcher_quit_game(self);
     } else if (lv_obj_get_user_data(target) == launcher_launch_game) {

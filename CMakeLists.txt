@@ -17,6 +17,14 @@ else ()
     endif ()
 endif ()
 
+set(MOONLIGHT_VERSION_OVERRIDE "" CACHE STRING "Explicit local package version")
+if (MOONLIGHT_VERSION_OVERRIDE)
+    if (NOT MOONLIGHT_VERSION_OVERRIDE MATCHES "^[0-9]+\\.[0-9]+\\.[0-9]+$")
+        message(FATAL_ERROR "MOONLIGHT_VERSION_OVERRIDE must be major.minor.patch")
+    endif ()
+    set(MOONLIGHT_VERSION "${MOONLIGHT_VERSION_OVERRIDE}")
+endif ()
+
 project(moonlight VERSION ${MOONLIGHT_VERSION} LANGUAGES C)
 
 # To suppress warnings for MbedTLS

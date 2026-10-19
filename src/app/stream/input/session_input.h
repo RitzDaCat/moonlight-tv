@@ -27,7 +27,9 @@ typedef struct session_input_vmouse_t {
         bool l, r;
         bool modifier;
     } state;
-    SDL_TimerID timer_id;
+    session_t *session;
+    bool running;
+    uint32_t next_tick;
 } session_input_vmouse_t;
 
 typedef struct stream_input_t {

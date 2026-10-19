@@ -1,6 +1,7 @@
 #include "split.controller.h"
 
 #include "app.h"
+#include "app_session.h"
 #include "appitem.view.h"
 #include "coverloader.h"
 #include "backend/apploader/apploader.h"
@@ -453,8 +454,21 @@ static void side_update(split_side_t *side) {
 }
 
 static void try_start(split_controller_t *controller) {
+    if (!app_session_split_supported(controller->global)) {
+        for (int i = 0; i < 2; ++i) {
+            lv_label_set_text_static(controller->sides[i].status,
+                    locstr("Selected decoder does not support simultaneous streams"));
+        }
+        return;
+    }
     split_side_t *left = &controller->sides[0], *right = &controller->sides[1];
     if (left->picked_app == 0 || right->picked_app == 0) {
+        return;
+    }
+    if (uuidstr_t_equals_t(&left->uuid, &right->uuid)) {
+        right->picked_app = 0;
+        lv_label_set_text_static(right->status, locstr("Choose a different computer for Player 2"));
+        set_active_side(controller, 1);
         return;
     }
     const apploader_item_t *left_app = apploader_list_item_by_id(left->apps, left->picked_app);

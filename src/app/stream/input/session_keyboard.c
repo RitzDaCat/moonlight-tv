@@ -1,3 +1,4 @@
+#include "stream/session_priv.h"
 #include "app.h"
 #include "logging.h"
 #include "stream/input/session_input.h"
@@ -429,7 +430,7 @@ void stream_input_handle_key(stream_input_t *input, const SDL_KeyboardEvent *eve
         } else if (event->state == SDL_RELEASED) {
             keydown_count--;
         }
-        LiSendKeyboardEvent(0x8000 | keyCode,
+        input->session->mlc->LiSendKeyboardEvent(0x8000 | keyCode,
                             event->state == SDL_PRESSED ? KEY_ACTION_DOWN : KEY_ACTION_UP,
                             modifiers);
     }
@@ -459,5 +460,5 @@ void stream_input_handle_text(stream_input_t *input, const SDL_TextInputEvent *e
     if (!len) {
         return;
     }
-    LiSendUtf8TextEvent(event->text, len);
+    input->session->mlc->LiSendUtf8TextEvent(event->text, len);
 }

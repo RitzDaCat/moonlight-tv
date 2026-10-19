@@ -24,8 +24,11 @@ typedef struct launcher_fragment_t {
     lv_obj_t *nav;
     lv_obj_t *detail;
     lv_obj_t *pclist;
+    lv_obj_t *home_btn, *computers_btn, *host_btn, *host_label;
+    lv_obj_t *computer_panel;
+    lv_obj_t *footer_hint;
     lv_obj_t *split_btn, *add_btn, *pref_btn, *help_btn, *quit_btn;
-    lv_group_t *nav_group, *detail_group;
+    lv_group_t *nav_group, *detail_group, *host_group;
     lv_style_transition_dsc_t tr_nav;
     lv_style_transition_dsc_t tr_detail;
     lv_style_t nav_host_style, nav_menu_style;
@@ -35,6 +38,8 @@ typedef struct launcher_fragment_t {
     bool pane_initialized;
     bool first_created;
     bool detail_changing;
+    bool computers_opened;
+    int navigation_focus;
 
     const app_launch_params_t *launch_params;
     bool def_host_selected;
@@ -47,5 +52,9 @@ lv_obj_t *launcher_win_create(lv_fragment_t *self, lv_obj_t *parent);
 launcher_fragment_t *launcher_instance();
 
 void launcher_select_server(launcher_fragment_t *controller, const uuidstr_t *uuid);
+
+void launcher_focus_navigation(launcher_fragment_t *controller);
+
+void launcher_focus_home(launcher_fragment_t *controller);
 
 extern const lv_fragment_class_t launcher_controller_class;

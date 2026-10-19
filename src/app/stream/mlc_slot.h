@@ -16,6 +16,17 @@
     X(LiStartConnection) \
     X(LiStopConnection) \
     X(LiGetHdrMetadata) \
+    X(LiGetHostFeatureFlags) \
+    X(LiSendMouseMoveEvent) \
+    X(LiSendMousePositionEvent) \
+    X(LiSendMouseButtonEvent) \
+    X(LiSendScrollEvent) \
+    X(LiSendHScrollEvent) \
+    X(LiSendHighResScrollEvent) \
+    X(LiSendHighResHScrollEvent) \
+    X(LiSendTouchEvent) \
+    X(LiSendKeyboardEvent) \
+    X(LiSendUtf8TextEvent) \
     X(LiSendMultiControllerEvent) \
     X(LiSendControllerArrivalEvent) \
     X(LiSendControllerMotionEvent) \

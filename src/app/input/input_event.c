@@ -1,5 +1,6 @@
 #include "app_input.h"
 #include "input_gamepad.h"
+#include "app.h"
 
 #include <SDL_events.h>
 
@@ -16,6 +17,7 @@ void app_input_handle_event(app_input_t *input, const SDL_Event *event) {
         }
         app_input_init_gamepad(input, event->jdevice.which);
     } else if (event->type == SDL_JOYDEVICEREMOVED) {
+        lv_sdl_key_input_release_controller(input->app->ui.input.key.indev, event->jdevice.which);
         app_input_close_gamepad(input, event->jdevice.which);
     } else if (event->type == SDL_CONTROLLERDEVICEADDED) {
         commons_log_debug("Input", "SDL_CONTROLLERDEVICEADDED");

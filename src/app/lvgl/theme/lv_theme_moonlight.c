@@ -4,6 +4,7 @@
 
 #include "util/font.h"
 #include "lvgl/ext/lv_child_group.h"
+#include "ui/tv_style.h"
 
 static lv_style_t knob_shadow;
 
@@ -54,6 +55,7 @@ const lv_font_t *lv_theme_moonlight_get_iconfont_small(lv_obj_t *obj) {
 static void apply_cb(lv_theme_t *theme, lv_obj_t *obj) {
     app_t *app = theme->user_data;
     bool set_font = true;
+    if (lv_obj_is_group_def(obj)) tv_focus_style(obj);
     if (lv_obj_has_class(obj, &lv_btn_class)) {
         lv_obj_set_style_flex_cross_place(obj, LV_FLEX_ALIGN_CENTER, 0);
     }
@@ -83,6 +85,7 @@ static void apply_cb(lv_theme_t *theme, lv_obj_t *obj) {
         lv_obj_add_event_cb(obj, lv_start_text_input, LV_EVENT_FOCUSED, theme);
         lv_obj_add_event_cb(obj, lv_stop_text_input, LV_EVENT_DEFOCUSED, theme);
     } else if (lv_obj_check_type(obj, &lv_msgbox_class)) {
+        tv_surface(obj, TV_SURFACE);
         if (lv_obj_get_width(lv_scr_act()) / 10 * 4 > LV_DPI_DEF * 2) {
             lv_obj_set_width(obj, LV_PCT(40));
         } else {

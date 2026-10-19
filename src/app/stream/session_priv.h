@@ -9,6 +9,8 @@
 #include "stream/session.h"
 #include "embed_wrapper.h"
 #include "mlc_slot.h"
+#include "session_stats.h"
+#include "stream/audio/audio_control.h"
 
 typedef struct app_t app_t;
 
@@ -37,6 +39,8 @@ struct session_t {
     SDL_mutex *mutex;
     SDL_Thread *thread;
     SS4S_Player *player;
+    session_stats_t stats;
+    stream_audio_control_t audio_control;
     /* Stream library copy driving this session, index into mlc_slots */
     int slot;
     const mlc_api_t *mlc;
@@ -64,9 +68,12 @@ static inline short session_host_gamepad_mask(const session_t *session, short ma
     if (!session->split) {
         return mask;
     }
+    /* The protocol mask is16 bits. A connected pad15 sets the sign bit of
+     * short; arithmetic right shifts must not keep this loop alive forever. */
+    unsigned short active = (unsigned short) mask;
     short host_mask = 0;
-    for (int host_id = 0; (mask >> session->slot) >> (host_id << 1); host_id++) {
-        if (mask & (1 << ((host_id << 1) | session->slot))) {
+    for (int host_id = 0; host_id < 8; host_id++) {
+        if (active & (1U << ((host_id << 1) | session->slot))) {
             host_mask |= (short) (1 << host_id);
         }
     }

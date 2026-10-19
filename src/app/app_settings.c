@@ -150,6 +150,12 @@ bool settings_save(app_settings_t *config) {
     }
     ini_write_string(fp, "surround", serialize_audio_config(config->stream.audioConfiguration));
 
+    for (int player = 0; player < 2; ++player) {
+        ini_write_section(fp, player == 0 ? "audio_player1" : "audio_player2");
+        ini_write_int(fp, "gain_db", config->split_audio_gain_db[player]);
+        ini_write_bool(fp, "muted", config->split_audio_muted[player]);
+    }
+
     if (!config->fullscreen) {
         ini_write_section(fp, "window");
         ini_write_int(fp, "x", config->window_state.x);
@@ -261,6 +267,18 @@ static int indexed_setting_parse(const char *value, const char *const values[],
 }
 
 static int settings_parse(app_settings_t *config, const char *section, const char *name, const char *value) {
+    for (int player = 0; player < 2; ++player) {
+        if (strcmp(section, player == 0 ? "audio_player1" : "audio_player2") != 0) continue;
+        if (strcmp(name, "gain_db") == 0) {
+            int *gain = &config->split_audio_gain_db[player];
+            set_int(gain, value);
+            if (*gain < -60) *gain = -60;
+            if (*gain > 0) *gain = 0;
+        } else if (strcmp(name, "muted") == 0) {
+            config->split_audio_muted[player] = INI_IS_TRUE(value);
+        }
+        return 1;
+    }
     if (INI_FULL_MATCH("streaming", "width")) {
         set_int(&config->stream.width, value);
     } else if (INI_FULL_MATCH("streaming", "height")) {

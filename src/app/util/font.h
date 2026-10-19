@@ -6,9 +6,11 @@ typedef struct app_fontset_t {
     int small_size;
     int normal_size;
     int large_size;
+    int display_size;
     lv_font_t *small;
     lv_font_t *normal;
     lv_font_t *large;
+    lv_font_t *display;
     struct app_fontset_t *fallback;
 } app_fontset_t;
 

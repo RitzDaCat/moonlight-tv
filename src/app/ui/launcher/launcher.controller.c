@@ -1,5 +1,6 @@
 #include "app.h"
 #include "app_launch.h"
+#include "app_session.h"
 
 #include "add.dialog.h"
 #include "split.controller.h"
@@ -20,6 +21,8 @@
 #include "util/i18n.h"
 #include "util/user_event.h"
 #include "logging.h"
+#include "ui/tv_style.h"
+#include "input/input_gamepad.h"
 
 static void launcher_controller(lv_fragment_t *self, void *args);
 
@@ -80,6 +83,14 @@ static void show_conf_persistent_error();
 static void decoder_error_cb(lv_event_t *e);
 
 static void populate_selected_host(launcher_fragment_t *controller);
+static void open_home(lv_event_t *event);
+static void open_computers(lv_event_t *event);
+static void show_computers(launcher_fragment_t *controller);
+static void pc_options(lv_obj_t *target);
+static void computer_key(lv_event_t *event);
+static void computer_cancel(lv_event_t *event);
+static void section_key(lv_event_t *event);
+static void update_header(launcher_fragment_t *controller);
 
 const lv_fragment_class_t launcher_controller_class = {
         .constructor_cb = launcher_controller,
@@ -114,9 +125,10 @@ void launcher_select_server(launcher_fragment_t *controller, const uuidstr_t *uu
         pair_dialog_open(uuid);
         return;
     }
-    set_detail_opened(controller, true);
-    if (node->selected) { return; }
-    select_pc(controller, uuid, false);
+    if (!node->selected || !lv_fragment_manager_find_by_container(controller->base.child_manager, controller->detail)) {
+        select_pc(controller, uuid, false);
+    }
+    launcher_focus_home(controller);
 }
 
 static void launcher_controller(lv_fragment_t *self, void *args) {
@@ -131,9 +143,7 @@ static void launcher_controller(lv_fragment_t *self, void *args) {
     lv_style_transition_dsc_init(&fragment->tr_nav, props, lv_anim_path_ease_out, 350, 0, NULL);
 
     lv_style_init(&fragment->nav_host_style);
-    int ico_width_def = lv_txt_get_width(MAT_SYMBOL_SETTINGS, sizeof(MAT_SYMBOL_SETTINGS), ui->fonts.icons.normal, 0,
-                                         0);
-    int host_icon_pad = (LV_DPX(NAV_WIDTH_COLLAPSED) - ico_width_def) / 2;
+    int host_icon_pad = LV_DPX(10);
     lv_style_set_pad_left(&fragment->nav_host_style, host_icon_pad);
     lv_style_set_pad_gap(&fragment->nav_host_style, host_icon_pad);
 
@@ -161,6 +171,8 @@ static void launcher_view_init(lv_fragment_t *self, lv_obj_t *view) {
     LV_UNUSED(view);
     launcher_fragment_t *fragment = (launcher_fragment_t *) self;
     pcmanager_register_listener(pcmanager, &pcmanager_callbacks, fragment);
+    int restore_focus = fragment->navigation_focus;
+    fragment->pane_initialized = false;
     lv_obj_add_event_cb(fragment->nav, cb_nav_focused, LV_EVENT_FOCUSED, fragment);
     lv_obj_add_event_cb(fragment->nav, cb_nav_key, LV_EVENT_KEY, fragment);
     lv_obj_add_event_cb(fragment->nav, app_quit_confirm, LV_EVENT_CANCEL, fragment);
@@ -175,6 +187,15 @@ static void launcher_view_init(lv_fragment_t *self, lv_obj_t *view) {
 #endif
     lv_obj_add_event_cb(fragment->help_btn, open_help, LV_EVENT_CLICKED, fragment);
     lv_obj_add_event_cb(fragment->quit_btn, app_quit_confirm, LV_EVENT_CLICKED, fragment);
+    lv_obj_add_event_cb(fragment->home_btn, open_home, LV_EVENT_CLICKED, fragment);
+    lv_obj_add_event_cb(fragment->computers_btn, open_computers, LV_EVENT_CLICKED, fragment);
+    lv_obj_add_event_cb(fragment->host_btn, open_computers, LV_EVENT_CLICKED, fragment);
+    lv_obj_add_event_cb(fragment->computer_panel, computer_key, LV_EVENT_KEY, fragment);
+    lv_obj_add_event_cb(fragment->computer_panel, computer_cancel, LV_EVENT_CANCEL, fragment);
+    lv_obj_add_event_cb(view, section_key, LV_EVENT_KEY, fragment);
+    lv_obj_add_flag(fragment->nav, LV_OBJ_FLAG_EVENT_BUBBLE);
+    lv_obj_add_flag(fragment->detail, LV_OBJ_FLAG_EVENT_BUBBLE);
+    lv_obj_add_flag(fragment->computer_panel, LV_OBJ_FLAG_EVENT_BUBBLE);
 
     update_pclist(fragment);
 
@@ -192,10 +213,9 @@ static void launcher_view_init(lv_fragment_t *self, lv_obj_t *view) {
     }
     fragment->pane_initialized = true;
     set_detail_opened(fragment, fragment->detail_opened);
+    update_header(fragment);
     pcmanager_auto_discovery_start(pcmanager);
 
-    lv_obj_set_style_transition(fragment->detail, &fragment->tr_nav, 0);
-    lv_obj_set_style_transition(fragment->detail, &fragment->tr_detail, LV_STATE_USER_1);
     current_instance = fragment;
 
     if (fragment->first_created) {
@@ -207,6 +227,14 @@ static void launcher_view_init(lv_fragment_t *self, lv_obj_t *view) {
         }
     }
     fragment->first_created = false;
+    if (!fragment->detail_opened || restore_focus == 2 || restore_focus == 3) {
+        set_detail_opened(fragment, false);
+        lv_obj_t *tabs[] = {fragment->home_btn, fragment->computers_btn, fragment->split_btn,
+                           fragment->pref_btn, fragment->help_btn, fragment->host_btn};
+        int index = restore_focus;
+        if (index >= 0 && index < 6 && tabs[index]) lv_group_focus_obj(tabs[index]);
+    }
+    fragment->navigation_focus = 0;
 }
 
 static void launcher_view_destroy(lv_fragment_t *self, lv_obj_t *view) {
@@ -221,6 +249,8 @@ static void launcher_view_destroy(lv_fragment_t *self, lv_obj_t *view) {
 
     lv_group_del(controller->nav_group);
     lv_group_del(controller->detail_group);
+    lv_group_del(controller->host_group);
+    controller->computers_opened = false;
 
     pcmanager_unregister_listener(pcmanager, &pcmanager_callbacks);
 }
@@ -241,6 +271,7 @@ void on_pc_added(const uuidstr_t *uuid, void *userdata) {
     pclist_item_create(controller, node);
 
     populate_selected_host(controller);
+    update_header(controller);
 }
 
 void on_pc_updated(const uuidstr_t *uuid, void *userdata) {
@@ -254,6 +285,7 @@ void on_pc_updated(const uuidstr_t *uuid, void *userdata) {
         lv_btn_set_icon(child, icon);
         break;
     }
+    update_header(controller);
 }
 
 void on_pc_removed(const uuidstr_t *uuid, void *userdata) {
@@ -265,6 +297,7 @@ void on_pc_removed(const uuidstr_t *uuid, void *userdata) {
         lv_obj_del(child);
         break;
     }
+    update_header(controller);
 }
 
 static void cb_pc_selected(lv_event_t *event) {
@@ -279,6 +312,10 @@ static void cb_pc_selected(lv_event_t *event) {
 static void cb_pc_longpress(lv_event_t *event) {
     lv_obj_t *target = lv_event_get_target(event);
     if (lv_obj_get_parent(target) != lv_event_get_current_target(event)) { return; }
+    pc_options(target);
+}
+
+static void pc_options(lv_obj_t *target) {
     const uuidstr_t *uuid = (const uuidstr_t *) lv_obj_get_user_data(target);
     lv_fragment_t *fragment = lv_fragment_create(&server_menu_class, (void *) uuid);
     lv_obj_t *msgbox = lv_fragment_create_obj(fragment, NULL);
@@ -311,6 +348,7 @@ static void select_pc(launcher_fragment_t *controller, const uuidstr_t *uuid, bo
             pcitem_set_selected(pcitem, false);
         }
     }
+    update_header(controller);
 }
 
 static void update_pclist(launcher_fragment_t *controller) {
@@ -340,14 +378,13 @@ static lv_obj_t *pclist_item_create(launcher_fragment_t *fragment, const pclist_
     lv_obj_t *pcitem = lv_list_add_btn(fragment->pclist, icon, server->hostname);
     lv_obj_add_flag(pcitem, LV_OBJ_FLAG_EVENT_BUBBLE);
     lv_obj_add_style(pcitem, &fragment->nav_host_style, 0);
+    lv_obj_set_style_bg_opa(pcitem, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_bg_color(pcitem, lv_color_hex(0x263449), LV_STATE_CHECKED);
+    lv_obj_set_style_bg_opa(pcitem, LV_OPA_COVER, LV_STATE_CHECKED);
+    tv_focus_style(pcitem);
     lv_obj_t *btn_img = lv_btn_find_img(pcitem);
     lv_obj_set_style_text_font(btn_img, ui->fonts.icons.normal, 0);
-    lv_obj_set_style_bg_opa(btn_img, LV_OPA_COVER, LV_STATE_CHECKED);
-    lv_obj_set_style_text_color(btn_img, lv_color_black(), LV_STATE_CHECKED);
-    lv_obj_set_style_radius(btn_img, LV_DPX(1), LV_STATE_CHECKED);
-    lv_obj_set_style_outline_color(btn_img, lv_color_white(), LV_STATE_CHECKED);
-    lv_obj_set_style_outline_opa(btn_img, LV_OPA_COVER, LV_STATE_CHECKED);
-    lv_obj_set_style_outline_width(btn_img, LV_DPX(2), LV_STATE_CHECKED);
+    lv_obj_set_style_text_color(btn_img, lv_color_hex(TV_MUTED), 0);
     uuidstr_t *uuid = SDL_malloc(sizeof(uuidstr_t));
     *uuid = node->id;
     lv_obj_set_user_data(pcitem, uuid);
@@ -383,10 +420,10 @@ static const char *server_item_icon(const pclist_t *node) {
 
 static void cb_detail_focused(lv_event_t *event) {
     launcher_fragment_t *fragment = lv_event_get_user_data(event);
-    if (!fragment->pane_initialized || fragment->detail_changing) { return; }
+    if (!fragment->pane_initialized || fragment->detail_changing || fragment->detail_opened) { return; }
     lv_fragment_t *detail_fragment = lv_fragment_manager_find_by_container(fragment->base.child_manager,
                                                                            fragment->detail);
-    if (!detail_fragment || lv_obj_get_parent(event->target) != detail_fragment->obj) { return; }
+    if (!detail_fragment || event->target == fragment->detail) { return; }
     set_detail_opened(fragment, true);
 }
 
@@ -409,31 +446,32 @@ static void cb_nav_focused(lv_event_t *event) {
 static void cb_nav_key(lv_event_t *event) {
     launcher_fragment_t *fragment = lv_event_get_user_data(event);
     switch (lv_event_get_key(event)) {
-        case LV_KEY_UP: {
+        case LV_KEY_LEFT: {
             lv_group_t *group = fragment->nav_group;
             lv_group_focus_prev(group);
             break;
         }
-        case LV_KEY_DOWN: {
+        case LV_KEY_RIGHT: {
             lv_group_t *group = fragment->nav_group;
             lv_group_focus_next(group);
             break;
         }
-        case LV_KEY_RIGHT: {
-            lv_fragment_t *detail_fragment = lv_fragment_manager_find_by_container(fragment->base.child_manager,
-                                                                                   fragment->detail);
-            if (detail_fragment) {
-                set_detail_opened(fragment, true);
-            }
+        case LV_KEY_DOWN: {
+            launcher_focus_home(fragment);
             break;
         }
     }
 }
 
 static void set_detail_opened(launcher_fragment_t *controller, bool opened) {
+    /* Focus events bubble synchronously, including the grid's item focus events. */
+    controller->detail_opened = opened;
     bool key = app_ui_get_input_mode(&controller->global->ui.input) & UI_INPUT_MODE_BUTTON_FLAG;
     if (opened) {
-        lv_obj_add_state(controller->detail, LV_STATE_USER_1);
+        lv_obj_add_flag(controller->computer_panel, LV_OBJ_FLAG_HIDDEN);
+        controller->computers_opened = false;
+        lv_obj_clear_state(controller->computers_btn, LV_STATE_CHECKED);
+        lv_obj_add_state(controller->home_btn, LV_STATE_CHECKED);
         app_input_set_group(&controller->global->ui.input, controller->detail_group);
         lv_obj_t *detail_focused = lv_group_get_focused(controller->detail_group);
         if (key && detail_focused) {
@@ -445,7 +483,6 @@ static void set_detail_opened(launcher_fragment_t *controller, bool opened) {
             }
         }
     } else {
-        lv_obj_clear_state(controller->detail, LV_STATE_USER_1);
         app_input_set_group(&controller->global->ui.input, controller->nav_group);
         if (key) {
             lv_obj_t *nav_focused = lv_group_get_focused(controller->nav_group);
@@ -457,6 +494,112 @@ static void set_detail_opened(launcher_fragment_t *controller, bool opened) {
     controller->detail_opened = opened;
 }
 
+void launcher_focus_navigation(launcher_fragment_t *controller) {
+    if (!controller || !controller->pane_initialized) return;
+    lv_obj_add_flag(controller->computer_panel, LV_OBJ_FLAG_HIDDEN);
+    controller->computers_opened = false;
+    set_detail_opened(controller, false);
+}
+
+void launcher_focus_home(launcher_fragment_t *controller) {
+    lv_fragment_t *detail = lv_fragment_manager_find_by_container(controller->base.child_manager, controller->detail);
+    if (!detail) {
+        show_computers(controller);
+        return;
+    }
+    set_detail_opened(controller, true);
+    apps_focus_primary((apps_fragment_t *) detail);
+}
+
+static void open_home(lv_event_t *event) {
+    launcher_focus_home(lv_event_get_user_data(event));
+}
+
+static void open_computers(lv_event_t *event) {
+    launcher_fragment_t *controller = lv_event_get_user_data(event);
+    show_computers(controller);
+}
+
+static void show_computers(launcher_fragment_t *controller) {
+    controller->computers_opened = true;
+    controller->detail_opened = false;
+    lv_obj_clear_flag(controller->computer_panel, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_clear_state(controller->home_btn, LV_STATE_CHECKED);
+    lv_obj_add_state(controller->computers_btn, LV_STATE_CHECKED);
+    app_input_set_group(&controller->global->ui.input, controller->host_group);
+    lv_obj_t *selected = controller->add_btn;
+    for (uint32_t i = 0; i < lv_obj_get_child_cnt(controller->pclist); ++i) {
+        lv_obj_t *host = lv_obj_get_child(controller->pclist, i);
+        if (i == 0 || lv_obj_has_state(host, LV_STATE_CHECKED)) selected = host;
+        if (lv_obj_has_state(host, LV_STATE_CHECKED)) break;
+    }
+    lv_group_focus_obj(selected);
+    lv_obj_add_state(selected, LV_STATE_FOCUS_KEY);
+}
+
+static void computer_key(lv_event_t *event) {
+    launcher_fragment_t *controller = lv_event_get_user_data(event);
+    uint32_t key = lv_event_get_key(event);
+    if (key == LV_KEY_UP) lv_group_focus_prev(controller->host_group);
+    if (key == LV_KEY_DOWN) lv_group_focus_next(controller->host_group);
+    if (key == LV_KEY_DEL && lv_obj_get_parent(event->target) == controller->pclist) pc_options(event->target);
+}
+
+static void computer_cancel(lv_event_t *event) {
+    launcher_fragment_t *controller = lv_event_get_user_data(event);
+    launcher_focus_navigation(controller);
+    lv_obj_clear_state(controller->computers_btn, LV_STATE_CHECKED);
+    lv_obj_add_state(controller->home_btn, LV_STATE_CHECKED);
+    lv_group_focus_obj(controller->computers_btn);
+    lv_event_stop_bubbling(event);
+}
+
+static void section_key(lv_event_t *event) {
+    launcher_fragment_t *controller = lv_event_get_user_data(event);
+    uint32_t key = lv_event_get_key(event);
+    if (key != UI_KEY_SECTION_PREV && key != UI_KEY_SECTION_NEXT) return;
+    launcher_focus_navigation(controller);
+    if (key == UI_KEY_SECTION_PREV) lv_group_focus_prev(controller->nav_group);
+    else lv_group_focus_next(controller->nav_group);
+    lv_event_stop_bubbling(event);
+}
+
+static void update_header(launcher_fragment_t *controller) {
+    if (!controller->host_label) return;
+    const pclist_t *selected = NULL;
+    for (const pclist_t *node = pcmanager_servers(pcmanager); node; node = node->next) {
+        if (node->selected) { selected = node; break; }
+    }
+    if (!selected) {
+        lv_label_set_text(controller->host_label, locstr("Choose computer"));
+        return;
+    }
+    const char *status = locstr("Checking");
+    switch (selected->state.code) {
+        case SERVER_STATE_AVAILABLE: status = locstr("Online"); break;
+        case SERVER_STATE_NOT_PAIRED: status = locstr("Pair"); break;
+        case SERVER_STATE_OFFLINE: status = locstr("Offline"); break;
+        case SERVER_STATE_ERROR: status = locstr("Error"); break;
+        default: break;
+    }
+    lv_label_set_text_fmt(controller->host_label, "%s  ·  %s", selected->server->hostname, status);
+    const char *hints = locstr("D-pad / stick  Move     A  Select     B  Back     LB / RB  Sections     X  Options");
+#if SDL_VERSION_ATLEAST(2, 0, 12)
+    for (size_t i = 0; i < controller->global->input.max_num_gamepads; ++i) {
+        const app_gamepad_state_t *pad = app_input_gamepad_state_by_index(&controller->global->input, (int) i);
+        if (!pad || !pad->controller) continue;
+        SDL_GameControllerType type = SDL_GameControllerGetType(pad->controller);
+        if (type == SDL_CONTROLLER_TYPE_PS3 || type == SDL_CONTROLLER_TYPE_PS4
+#if SDL_VERSION_ATLEAST(2, 0, 14)
+            || type == SDL_CONTROLLER_TYPE_PS5
+#endif
+        ) hints = locstr("D-pad / stick  Move     Cross  Select     Circle  Back     L1 / R1  Sections     Square  Options");
+        break;
+    }
+#endif
+    lv_label_set_text_static(controller->footer_hint, hints);
+}
+
 static void open_manual_add(lv_event_t *event) {
     LV_UNUSED(event);
     lv_fragment_t *fragment = lv_fragment_create(&add_dialog_class, NULL);
@@ -466,6 +609,8 @@ static void open_manual_add(lv_event_t *event) {
 
 static void open_settings(lv_event_t *event) {
     launcher_fragment_t *self = lv_event_get_user_data(event);
+    self->navigation_focus = 3;
+    self->detail_opened = false;
     lv_fragment_t *fragment = lv_fragment_create(&settings_controller_cls, self->global);
     lv_obj_t *const *container = lv_fragment_get_container(lv_fragment_manager_get_top(self->global->ui.fm));
     lv_fragment_manager_push(self->global->ui.fm, fragment, container);
@@ -474,6 +619,17 @@ static void open_settings(lv_event_t *event) {
 #if FEATURE_SPLIT_SCREEN
 static void open_split_screen(lv_event_t *event) {
     launcher_fragment_t *self = lv_event_get_user_data(event);
+    self->navigation_focus = 2;
+    self->detail_opened = false;
+    if (!app_session_split_supported(self->global)) {
+        static const char *buttons[] = {translatable("OK"), ""};
+        lv_obj_t *message = lv_msgbox_create_i18n(NULL, locstr("Split screen unavailable"),
+                locstr("The selected decoder does not support simultaneous split-screen streams. Choose a compatible decoder to use split screen."),
+                buttons, false);
+        lv_obj_add_event_cb(message, decoder_error_cb, LV_EVENT_VALUE_CHANGED, NULL);
+        lv_obj_center(message);
+        return;
+    }
     lv_fragment_t *fragment = lv_fragment_create(&split_controller_class, self->global);
     lv_obj_t *const *container = lv_fragment_get_container(lv_fragment_manager_get_top(self->global->ui.fm));
     lv_fragment_manager_push(self->global->ui.fm, fragment, container);

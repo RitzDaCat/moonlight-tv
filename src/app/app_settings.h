@@ -45,6 +45,8 @@ typedef struct app_settings_t {
     char *language;
     bool sops;
     bool localaudio;
+    int split_audio_gain_db[2];
+    bool split_audio_muted[2];
     bool fullscreen;
     window_state_t window_state;
     int rotate;

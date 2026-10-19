@@ -6,6 +6,8 @@
 
 typedef struct app_t app_t;
 
+bool app_session_split_supported(const app_t *app);
+
 /* split_uuid and split_app start a second host on the right half; NULL for a normal stream */
 int app_session_begin(app_t *app, const uuidstr_t *uuid, const APP_LIST *gs_app, const uuidstr_t *split_uuid,
                       const APP_LIST *split_app);

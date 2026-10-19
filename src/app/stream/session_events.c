@@ -1,5 +1,6 @@
 #include "session_events.h"
 #include "session_priv.h"
+#include "input/session_virt_mouse.h"
 
 
 bool session_handle_input_event(session_t *session, const SDL_Event *event) {
@@ -79,6 +80,7 @@ void session_update_touchpad_tap_hold(session_t *session) {
     }
 
     stream_input_t *input = &session->input;
+    vmouse_update(&input->vmouse);
     if (input->touchpads != NULL) {
         stream_input_update_touchpad_tap_hold(input);
     }

@@ -8,13 +8,12 @@
 #include "stream/session_priv.h"
 #include "logging.h"
 
-#define SAMPLES_PER_FRAME  240
-
 static session_t *session = NULL;
 static SS4S_Player *player = NULL;
 static OpusMSDecoder *decoder = NULL;
 static unsigned char *buffer = NULL;
 static int frame_size = 0, unit_size = 0;
+static unsigned sample_rate = 0, channels = 0;
 
 AUDIO_INFO audio_stream_info;
 
@@ -26,9 +25,17 @@ static int aud_init(int audioConfiguration, const POPUS_MULTISTREAM_CONFIGURATIO
                     int arFlags) {
     (void) audioConfiguration;
     (void) arFlags;
+    if (opusConfig == NULL || opusConfig->sampleRate <= 0 || opusConfig->sampleRate > 48000 ||
+        opusConfig->channelCount <= 0 || opusConfig->channelCount > AUDIO_CONFIGURATION_MAX_CHANNEL_COUNT ||
+        opusConfig->samplesPerFrame <= 0 ||
+        opusConfig->samplesPerFrame > opusConfig->sampleRate * 120 / 1000) {
+        return -1;
+    }
     memset(&audio_stream_info, 0, sizeof(audio_stream_info));
     session = context;
     player = session->player;
+    sample_rate = (unsigned) opusConfig->sampleRate;
+    channels = (unsigned) opusConfig->channelCount;
     SS4S_AudioCodec codec = SS4S_AUDIO_PCM_S16LE;
     size_t codecDataLen = 0;
     SS4S_AudioInfo info = {
@@ -36,9 +43,9 @@ static int aud_init(int audioConfiguration, const POPUS_MULTISTREAM_CONFIGURATIO
             .appName = "Moonlight",
             .streamName = "Streaming",
             .sampleRate = opusConfig->sampleRate,
-            .samplesPerFrame = SAMPLES_PER_FRAME,
+            .samplesPerFrame = opusConfig->samplesPerFrame,
     };
-    if (session->audio_cap.codecs & SS4S_AUDIO_OPUS && SS4S_GetAudioPreferredCodecs(&info) & SS4S_AUDIO_OPUS) {
+    if (!session->split && session->audio_cap.codecs & SS4S_AUDIO_OPUS && SS4S_GetAudioPreferredCodecs(&info) & SS4S_AUDIO_OPUS) {
         codec = SS4S_AUDIO_OPUS;
         decoder = NULL;
         buffer = calloc(1024, sizeof(unsigned char));
@@ -78,6 +85,7 @@ static int aud_init(int audioConfiguration, const POPUS_MULTISTREAM_CONFIGURATIO
             audio_stream_info.channels = "Unknown";
             break;
     }
+    session_stats_publish_audio(&session->stats, &audio_stream_info);
     info.codec = codec;
     info.codecData = buffer;
     info.codecDataLen = codecDataLen;
@@ -112,7 +120,17 @@ static void aud_feed(char *sampleData, int sampleLength) {
     if (decoder != NULL) {
         int decode_len = opus_multistream_decode(decoder, (unsigned char *) sampleData, sampleLength,
                                                  (opus_int16 *) buffer, frame_size, 0);
-        SS4S_PlayerAudioFeed(player, buffer, unit_size * decode_len);
+        if (decode_len <= 0) {
+            commons_log_warn("Session", "Discarding invalid Opus packet: %d", decode_len);
+            return;
+        }
+        if (session->split) {
+            /* Keep decoding and feed silence while muted, preserving Opus
+             * history, backend timing and immediate unmute readiness. */
+            stream_audio_control_apply(&session->audio_control, (int16_t *) buffer, (size_t) decode_len,
+                                       channels, sample_rate);
+        }
+        SS4S_PlayerAudioFeed(player, buffer, (size_t) unit_size * (size_t) decode_len);
     } else {
         SS4S_PlayerAudioFeed(player, (unsigned char *) sampleData, sampleLength);
     }

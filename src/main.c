@@ -1,5 +1,6 @@
 #include "app.h"
 #include "app_launch.h"
+#include "app_microphone_probe.h"
 #include "util/path.h"
 #include "logging.h"
 
@@ -32,6 +33,13 @@ int main(int argc, char *argv[]) {
     }
 
     app_launch_params_t *params = app_handle_launch(&app, argc, argv);
+
+    if (params != NULL && params->microphone_probe) {
+        ret = app_microphone_probe(params->microphone_probe_device);
+        app_launch_param_free(params);
+        app_deinit(&app);
+        return ret;
+    }
 
     app_ui_open(&app.ui, true, params);
 

@@ -10,6 +10,7 @@
 #include "stream/session_events.h"
 #include "input/input_gamepad.h"
 #include "ui/launcher/split.controller.h"
+#include "ui/tv_style.h"
 
 #if TARGET_WEBOS
 
@@ -35,12 +36,23 @@ int lv_sdl_init_key_input(lv_drv_sdl_key_t *drv, app_ui_input_t *input) {
     drv->base.read_cb = sdl_input_read;
 
     drv->state = LV_INDEV_STATE_RELEASED;
+    drv->controller_id = -1;
     return 0;
 }
 
 void lv_sdl_key_input_release_key(lv_indev_t *indev) {
     lv_drv_sdl_key_t *state = (lv_drv_sdl_key_t *) indev->driver;
     state->state = LV_INDEV_STATE_RELEASED;
+    state->stick_key = 0;
+    state->stick_x = state->stick_y = 0;
+}
+
+void lv_sdl_key_input_release_controller(lv_indev_t *indev, SDL_JoystickID instance_id) {
+    if (!indev) return;
+    lv_drv_sdl_key_t *state = (lv_drv_sdl_key_t *) indev->driver;
+    if (state->controller_id != instance_id) return;
+    lv_sdl_key_input_release_key(indev);
+    state->controller_id = -1;
 }
 
 /* A gap between two reads longer than this means the main loop stalled rather
@@ -142,6 +154,36 @@ static void sdl_input_read(lv_indev_drv_t *drv, lv_indev_data_t *data) {
 }
 
 static bool read_event(const SDL_Event *event, lv_drv_sdl_key_t *state) {
+    if (event->type == SDL_CONTROLLERAXISMOTION) {
+        if (event->caxis.axis != SDL_CONTROLLER_AXIS_LEFTX && event->caxis.axis != SDL_CONTROLLER_AXIS_LEFTY) return false;
+        if (state->stick_key && state->controller_id != event->caxis.which) return false;
+        if (state->controller_id != event->caxis.which) state->stick_x = state->stick_y = 0;
+        if (event->caxis.axis == SDL_CONTROLLER_AXIS_LEFTX) state->stick_x = event->caxis.value;
+        else state->stick_y = event->caxis.value;
+        /* Hysteresis prevents stick noise from repeatedly releasing/pressing focus. */
+        int threshold = state->stick_key ? 8192 : 16384;
+        int x = state->stick_x, y = state->stick_y;
+        uint32_t key = 0;
+        if (SDL_abs(x) >= threshold && SDL_abs(x) >= SDL_abs(y)) key = x < 0 ? LV_KEY_LEFT : LV_KEY_RIGHT;
+        else if (SDL_abs(y) >= threshold) key = y < 0 ? LV_KEY_UP : LV_KEY_DOWN;
+        if (!key && !state->stick_key) return false;
+        state->key = key ? key : state->stick_key;
+        state->state = key ? LV_INDEV_STATE_PRESSED : LV_INDEV_STATE_RELEASED;
+        state->stick_key = key;
+        state->controller_id = event->caxis.which;
+        return true;
+    }
+    if (event->type == SDL_CONTROLLERBUTTONDOWN || event->type == SDL_CONTROLLERBUTTONUP) {
+        state->controller_id = event->cbutton.which;
+        state->stick_key = 0;
+        if (event->cbutton.button == SDL_CONTROLLER_BUTTON_LEFTSHOULDER ||
+            event->cbutton.button == SDL_CONTROLLER_BUTTON_RIGHTSHOULDER) {
+            state->key = event->cbutton.button == SDL_CONTROLLER_BUTTON_LEFTSHOULDER ?
+                         UI_KEY_SECTION_PREV : UI_KEY_SECTION_NEXT;
+            state->state = event->type == SDL_CONTROLLERBUTTONDOWN ? LV_INDEV_STATE_PRESSED : LV_INDEV_STATE_RELEASED;
+            return true;
+        }
+    }
     bool pressed = state->state == LV_INDEV_STATE_RELEASED;
     NAVKEY navkey = navkey_from_sdl(event, &pressed);
     switch (navkey) {
@@ -228,6 +270,12 @@ static bool read_keyboard(app_ui_input_t *input, const SDL_KeyboardEvent *event,
             break;
         case SDLK_END:
             state->key = LV_KEY_END;
+            break;
+        case SDLK_PAGEUP:
+            state->key = UI_KEY_SECTION_PREV;
+            break;
+        case SDLK_PAGEDOWN:
+            state->key = UI_KEY_SECTION_NEXT;
             break;
         default:
 #if TARGET_WEBOS

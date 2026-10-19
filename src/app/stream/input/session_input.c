@@ -20,6 +20,7 @@
 #include "stream/session.h"
 #include "stream/session_priv.h"
 #include "session_evmouse.h"
+#include "session_virt_mouse.h"
 
 /* Pointer travel, in host pixels, for a finger swept across the full width of the
  * touchpad at 100% sensitivity. Vertical travel is derived from each pad's own
@@ -31,6 +32,7 @@
 void session_input_init(stream_input_t *input, session_t *session, app_input_t *app_input,
                         const session_config_t *config) {
     input->session = session;
+    input->vmouse.session = session;
     input->input = app_input;
     input->view_only = config->view_only;
     input->stick_deadzone = config->stick_deadzone;
@@ -52,6 +54,7 @@ void session_input_init(stream_input_t *input, session_t *session, app_input_t *
 }
 
 void session_input_deinit(stream_input_t *input) {
+    vmouse_set_running(&input->vmouse, false);
     stream_input_touchpad_mouse_deinit(input);
 #if FEATURE_INPUT_EVMOUSE
     const session_config_t *config = &input->session->config;
@@ -72,6 +75,7 @@ void session_input_interrupt(stream_input_t *input) {
 
 void session_input_started(stream_input_t *input) {
     input->started = true;
+    vmouse_set_running(&input->vmouse, !input->view_only);
     if (!input->view_only) {
         stream_input_touchpad_mouse_init(input);
     }
@@ -86,6 +90,7 @@ void session_input_started(stream_input_t *input) {
 
 void session_input_stopped(stream_input_t *input) {
     input->started = false;
+    vmouse_set_running(&input->vmouse, false);
     stream_input_touchpad_mouse_deinit(input);
 }
 
