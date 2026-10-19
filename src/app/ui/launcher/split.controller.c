@@ -299,8 +299,8 @@ static void obj_created(lv_fragment_t *self, lv_obj_t *obj) {
         lv_coord_t width = lv_obj_get_content_width(side->grid);
         side->col_width = (width - lv_obj_get_style_pad_column(side->grid, 0) * (SPLIT_COLUMNS - 1)) / SPLIT_COLUMNS;
         side->col_height = side->col_width / 3 * 4;
-        lv_gridview_set_config(side->grid, SPLIT_COLUMNS, side->col_height, LV_GRID_ALIGN_CENTER,
-                               LV_GRID_ALIGN_CENTER);
+        lv_gridview_set_config(side->grid, SPLIT_COLUMNS, side->col_height + appitem_caption_height(side->grid),
+                               LV_GRID_ALIGN_START, LV_GRID_ALIGN_START);
         hosts_update(side);
     }
     controller->appitem_style.defcover_src.header.w = controller->sides[0].col_width;

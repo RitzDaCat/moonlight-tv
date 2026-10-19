@@ -2,6 +2,7 @@
 #include "app.h"
 #include "appitem.view.h"
 
+#include <math.h>
 #include <stddef.h>
 
 #include "util/bus.h"
@@ -23,7 +24,6 @@ typedef struct memcache_key_t {
     int id;
     uuidstr_t server_id;
     lv_coord_t target_width, target_height;
-    lv_coord_t caption_height;
     bool backdrop;
 } memcache_key_t;
 
@@ -31,7 +31,6 @@ typedef struct memcache_item_t {
     lv_img_dsc_t src;
     lv_sdl_img_data_t data;
     lv_ll_t objs;
-    lv_coord_t target_width, target_height, target_radius;
 } memcache_item_t;
 
 typedef struct img_loader_req_t {
@@ -41,7 +40,8 @@ typedef struct img_loader_req_t {
     lv_obj_t *target;
     lv_coord_t target_width, target_height;
     bool backdrop;
-    lv_coord_t caption_height;
+    /* Poster corner radius, baked into the image's alpha. */
+    lv_coord_t radius;
     memcache_item_t *src;
     bool finished;
     SDL_Surface *cached;
@@ -112,7 +112,7 @@ static bool cover_is_placeholder(const SDL_Surface *surface);
 static void display_cover(coverloader_t *loader, const uuidstr_t *uuid, int id, lv_obj_t *target,
                           lv_coord_t width, lv_coord_t height, bool backdrop);
 static SDL_Surface *make_backdrop(SDL_Surface *source, int width, int height);
-static SDL_Surface *make_thumbnail(SDL_Surface *source, int width, int height, int caption_height);
+static SDL_Surface *make_poster(SDL_Surface *source, int width, int height, int radius);
 
 static void target_deleted_cb(lv_event_t *e);
 
@@ -123,8 +123,6 @@ static void memcache_item_ref_obj(memcache_item_t *item, lv_obj_t *obj);
 static void memcache_item_unref_obj(memcache_item_t *item, const lv_obj_t *obj);
 
 static void purge_img_cache(lv_draw_sdl_ctx_t *ctx, const memcache_item_t *item);
-
-static void purge_corners_cache(lv_draw_sdl_ctx_t *ctx, const memcache_item_t *item);
 
 static const img_loader_impl_t coverloader_impl = {
         .memcache_get = coverloader_memcache_get,
@@ -211,8 +209,7 @@ static void display_cover(coverloader_t *loader, const uuidstr_t *uuid, int id, 
     req->target_width = target_width;
     req->target_height = target_height;
     req->backdrop = backdrop;
-    const appitem_viewholder_t *holder = lv_obj_get_user_data(target);
-    req->caption_height = !backdrop && holder->styles->show_title ? lv_obj_get_height(holder->title) : 0;
+    req->radius = backdrop ? 0 : lv_obj_get_style_radius(target, LV_PART_MAIN);
     req->finished = false;
     lv_obj_add_event_cb(target, target_deleted_cb, LV_EVENT_DELETE, req);
     loader->reqlist = reqlist_append(loader->reqlist, req);
@@ -248,7 +245,6 @@ static bool coverloader_memcache_get(coverloader_req_t *req) {
     key.target_width = req->target_width;
     key.target_height = req->target_height;
     key.backdrop = req->backdrop;
-    key.caption_height = req->caption_height;
 
     (void) key.target_width;
     (void) key.target_height;
@@ -272,16 +268,12 @@ static void coverloader_memcache_put(coverloader_req_t *req) {
     key.target_width = req->target_width;
     key.target_height = req->target_height;
     key.backdrop = req->backdrop;
-    key.caption_height = req->caption_height;
     lv_lru_get(req->loader->mem_cache, &key, sizeof(key), (void **) &result);
     if (result == NULL) {
         lv_draw_sdl_drv_param_t *param = lv_disp_get_default()->driver->user_data;
         SDL_Renderer *renderer = param->renderer;
 
         result = memcache_item_new();
-        result->target_width = req->target_width;
-        result->target_height = req->target_height;
-        result->target_radius = lv_obj_get_style_radius(req->target, 0);
         lv_img_dsc_t *src = &result->src;
         lv_sdl_img_data_t *data = &result->data;
         data->type = LV_SDL_IMG_TYPE_TEXTURE;
@@ -331,132 +323,300 @@ static bool coverloader_filecache_get(coverloader_req_t *req) {
         SDL_FreeSurface(decoded);
         return false;
     }
-    // Indexed images needs to be converted to true color before scaling
-    if (decoded->format->palette != NULL) {
-#if !SDL_VERSION_ATLEAST(2, 30, 0)
-#if SDL_BYTEORDER == SDL_BIG_ENDIAN
-#define SDL_PIXELFORMAT_RGBX32 SDL_PIXELFORMAT_RGBX8888
-#else
-#define SDL_PIXELFORMAT_RGBX32 SDL_PIXELFORMAT_XBGR8888
-#endif
-#endif
-        SDL_Surface *true_color = SDL_ConvertSurfaceFormat(decoded, SDL_PIXELFORMAT_RGBX32, 0);
-        SDL_FreeSurface(decoded);
-        if (true_color == NULL) {
-            return false;
-        }
-        decoded = true_color;
-    }
     if (req->backdrop) {
         req->cached = make_backdrop(decoded, req->target_width, req->target_height);
-        SDL_FreeSurface(decoded);
-        return req->cached != NULL;
-    }
-    if (req->target_width > req->target_height) {
-        req->cached = make_thumbnail(decoded, req->target_width, req->target_height, req->caption_height);
-        SDL_FreeSurface(decoded);
-        return req->cached != NULL;
-    }
-    int sw = decoded->w, sh = decoded->h;
-    while (sw > req->target_width * 1.5 || sh > req->target_height * 1.5) {
-        sw /= 2;
-        sh /= 2;
-    }
-    if (!sw || !sh) {
-        // Image is too small to display
-        SDL_FreeSurface(decoded);
-        return false;
-    }
-    double srcratio = sw / (double) sh, dstratio = req->target_width / (double) req->target_height;
-    SDL_Rect srcrect;
-    if (srcratio > dstratio) {
-        // Source is wider than destination
-        srcrect.h = sh;
-        srcrect.w = (int) (sh * dstratio);
-        srcrect.y = 0;
-        srcrect.x = (sw - srcrect.w) / 2;
     } else {
-        // Destination is wider than source
-        srcrect.w = sw;
-        srcrect.h = (int) (sw / dstratio);
-        srcrect.x = 0;
-        srcrect.y = (sh - srcrect.h) / 2;
+        req->cached = make_poster(decoded, req->target_width, req->target_height, req->radius);
     }
-    subimage_info_t *info = SDL_malloc(sizeof(subimage_info_t));
-    info->w = req->target_width;
-    info->h = req->target_height;
-    info->rect = srcrect;
-
-    if (sw == decoded->w && sh == decoded->h) {
-        decoded->userdata = info;
-        req->cached = decoded;
-        return true;
-    }
-
-    const SDL_PixelFormat *format = decoded->format;
-    SDL_Surface *scaled = SDL_CreateRGBSurface(0, sw, sh, format->BitsPerPixel,
-                                               format->Rmask, format->Gmask, format->Bmask, format->Amask);
-    SDL_BlitScaled(decoded, NULL, scaled, NULL);
     SDL_FreeSurface(decoded);
-    scaled->userdata = info;
-    req->cached = scaled;
-    return true;
+    return req->cached != NULL;
 }
 
 static bool cover_is_placeholder(const SDL_Surface *surface) {
     return (surface->w == 130 && surface->h == 180) || (surface->w == 628 && surface->h == 888);
 }
 
-static SDL_Surface *make_thumbnail(SDL_Surface *source, int width, int height, int caption_height) {
-    SDL_Surface *result = SDL_CreateRGBSurfaceWithFormat(0, width, height, 32, SDL_PIXELFORMAT_RGB888);
-    if (!result) return NULL;
-    SDL_FillRect(result, NULL, SDL_MapRGB(result->format, 0x18, 0x21, 0x30));
-    int padding = LV_MAX(LV_MIN(width, height) / 24, 1);
-    int available_w = LV_MAX(width - 2 * padding, 1);
-    int available_h = LV_MAX(height - caption_height - 2 * padding, 1);
-    double scale = LV_MIN(available_w / (double) source->w, available_h / (double) source->h);
-    /* Upscaling a tiny icon cannot recover detail. Preserve its pixels instead. */
-    if (source->w < 256 && source->h < 256) scale = LV_MIN(scale, 1.0);
-    SDL_Rect destination = {.w=LV_MAX((int) (source->w * scale), 1),
-                            .h=LV_MAX((int) (source->h * scale), 1)};
-    destination.x = (width - destination.w) / 2;
-    destination.y = padding + (available_h - destination.h) / 2;
-    if (SDL_BlitScaled(source, NULL, result, &destination) < 0) {
-        SDL_FreeSurface(result);
+/* Covers are prepared once on the image-loader worker at their display size, never per frame. */
+
+/* Premultiplied color, 0-255 per channel. */
+typedef struct pixelf_t {
+    float r, g, b, a;
+} pixelf_t;
+
+static pixelf_t hex_pixel(uint32_t hex) {
+    return (pixelf_t) {(float) ((hex >> 16) & 0xFF), (float) ((hex >> 8) & 0xFF), (float) (hex & 0xFF), 1};
+}
+
+static inline void pixelf_add(pixelf_t *sum, const pixelf_t *p, float k) {
+    sum->r += k * p->r;
+    sum->g += k * p->g;
+    sum->b += k * p->b;
+    sum->a += k * p->a;
+}
+
+static Uint32 pack_rgb(float r, float g, float b) {
+    return (Uint32) LV_CLAMP(0, (int) (r + 0.5f), 255) << 16 | (Uint32) LV_CLAMP(0, (int) (g + 0.5f), 255) << 8 |
+           (Uint32) LV_CLAMP(0, (int) (b + 0.5f), 255);
+}
+
+/* Taps of a box filter one output pixel wide, and at least one source pixel wide:
+ * shrinking averages the covered area, enlarging interpolates linearly. */
+typedef struct resample_axis_t {
+    int taps;
+    int *first;
+    float *weights;
+} resample_axis_t;
+
+static void resample_axis_deinit(resample_axis_t *axis) {
+    free(axis->first);
+    free(axis->weights);
+}
+
+/* Spreads the source span [start, start + span) over len output pixels. */
+static bool resample_axis_init(resample_axis_t *axis, int src_len, double start, double span, int len) {
+    double scale = span / len, half = LV_MAX(scale, 1.0) / 2;
+    axis->taps = LV_MIN((int) ceil(half * 2) + 1, src_len);
+    axis->first = malloc(sizeof(int) * len);
+    axis->weights = malloc(sizeof(float) * len * axis->taps);
+    if (!axis->first || !axis->weights) {
+        resample_axis_deinit(axis);
+        return false;
+    }
+    for (int i = 0; i < len; ++i) {
+        double center = start + (i + 0.5) * scale, lo = center - half, hi = center + half;
+        int first = LV_CLAMP(0, (int) floor(lo), src_len - axis->taps);
+        float *weights = &axis->weights[i * axis->taps];
+        float total = 0;
+        for (int t = 0; t < axis->taps; ++t) {
+            double overlap = LV_MIN(hi, first + t + 1.0) - LV_MAX(lo, (double) (first + t));
+            weights[t] = (float) LV_MAX(overlap, 0.0);
+            total += weights[t];
+        }
+        for (int t = 0; t < axis->taps; ++t) {
+            weights[t] /= total;
+        }
+        axis->first[i] = first;
+    }
+    return true;
+}
+
+/* A source rectangle of an ARGB8888 surface, resampled to width x height premultiplied pixels. */
+static pixelf_t *resample(const SDL_Surface *argb, double x, double y, double w, double h, int width, int height) {
+    resample_axis_t ax, ay;
+    if (!resample_axis_init(&ax, argb->w, x, w, width)) return NULL;
+    if (!resample_axis_init(&ay, argb->h, y, h, height)) {
+        resample_axis_deinit(&ax);
         return NULL;
     }
+    int row0 = ay.first[0], rows = ay.first[height - 1] + ay.taps - row0;
+    pixelf_t *columns = malloc(sizeof(pixelf_t) * width * rows);
+    pixelf_t *result = malloc(sizeof(pixelf_t) * width * height);
+    if (columns && result) {
+        for (int row = 0; row < rows; ++row) {
+            const Uint32 *src = (const Uint32 *) ((const Uint8 *) argb->pixels + (row0 + row) * argb->pitch);
+            pixelf_t *dst = &columns[row * width];
+            for (int i = 0; i < width; ++i) {
+                const Uint32 *px = &src[ax.first[i]];
+                const float *weights = &ax.weights[i * ax.taps];
+                pixelf_t sum = {0, 0, 0, 0};
+                for (int t = 0; t < ax.taps; ++t) {
+                    float wa = weights[t] * (float) (px[t] >> 24) / 255;
+                    sum.r += wa * (float) ((px[t] >> 16) & 0xFF);
+                    sum.g += wa * (float) ((px[t] >> 8) & 0xFF);
+                    sum.b += wa * (float) (px[t] & 0xFF);
+                    sum.a += wa;
+                }
+                dst[i] = sum;
+            }
+        }
+        for (int i = 0; i < height; ++i) {
+            const pixelf_t *src = &columns[(ay.first[i] - row0) * width];
+            const float *weights = &ay.weights[i * ay.taps];
+            pixelf_t *dst = &result[i * width];
+            for (int col = 0; col < width; ++col) {
+                pixelf_t sum = {0, 0, 0, 0};
+                for (int t = 0; t < ay.taps; ++t) {
+                    pixelf_add(&sum, &src[t * width + col], weights[t]);
+                }
+                dst[col] = sum;
+            }
+        }
+    } else {
+        free(result);
+        result = NULL;
+    }
+    free(columns);
+    resample_axis_deinit(&ax);
+    resample_axis_deinit(&ay);
     return result;
 }
 
-static SDL_Surface *make_backdrop(SDL_Surface *source, int width, int height) {
-    SDL_Surface *result = SDL_CreateRGBSurfaceWithFormat(0, width, height, 32, SDL_PIXELFORMAT_RGB888);
-    if (!result) return NULL;
-    SDL_Rect crop = {0, 0, source->w, source->h};
-    if ((int64_t) source->w * height > (int64_t) source->h * width) {
-        crop.w = (int) ((int64_t) source->h * width / height);
-        crop.x = (source->w - crop.w) / 2;
-    } else {
-        crop.h = (int) ((int64_t) source->w * height / width);
-        crop.y = (source->h - crop.h) / 2;
-    }
-    if (crop.w <= 0 || crop.h <= 0 || SDL_BlitScaled(source, &crop, result, NULL) < 0) {
-        SDL_FreeSurface(result);
-        return NULL;
-    }
-    /* Prepare once on the image-loader worker, never per display frame. */
-    int fade_width = LV_MAX(width * 2 / 5, 1), fade_height = LV_MAX(height / 3, 1);
-    for (int y = 0; y < height; ++y) {
-        Uint32 *row = (Uint32 *) ((Uint8 *) result->pixels + y * result->pitch);
-        int bottom = LV_MIN(255, (height - 1 - y) * 255 / fade_height);
-        for (int x = 0; x < width; ++x) {
-            int alpha = LV_MIN(LV_MIN(255, x * 255 / fade_width), bottom) * 220 / 255;
-            Uint32 pixel = row[x];
-            int r = (((pixel >> 16) & 255) * alpha + 11 * (255 - alpha)) / 255;
-            int g = (((pixel >> 8) & 255) * alpha + 17 * (255 - alpha)) / 255;
-            int b = ((pixel & 255) * alpha + 27 * (255 - alpha)) / 255;
-            row[x] = (Uint32) (r << 16 | g << 8 | b);
+/* Anti-aliased rounded corners in alpha, so drawing needs no clip mask. */
+static void round_corners(SDL_Surface *surface, int radius) {
+    radius = LV_MIN(radius, LV_MIN(surface->w, surface->h) / 2);
+    for (int y = 0; y < radius; ++y) {
+        Uint32 *top = (Uint32 *) ((Uint8 *) surface->pixels + y * surface->pitch);
+        Uint32 *bottom = (Uint32 *) ((Uint8 *) surface->pixels + (surface->h - 1 - y) * surface->pitch);
+        for (int x = 0; x < radius; ++x) {
+            float dx = (float) radius - ((float) x + 0.5f), dy = (float) radius - ((float) y + 0.5f);
+            float coverage = (float) radius + 0.5f - sqrtf(dx * dx + dy * dy);
+            /* Coverage only grows toward the middle of the row. */
+            if (coverage >= 1) break;
+            Uint32 alpha = coverage > 0 ? (Uint32) (coverage * 255 + 0.5f) << 24 : 0;
+            int mirror = surface->w - 1 - x;
+            top[x] = (top[x] & 0xFFFFFF) | alpha;
+            top[mirror] = (top[mirror] & 0xFFFFFF) | alpha;
+            bottom[x] = (bottom[x] & 0xFFFFFF) | alpha;
+            bottom[mirror] = (bottom[mirror] & 0xFFFFFF) | alpha;
         }
     }
+}
+
+/* The art center-cropped to the poster's shape, scaled to its exact size, corners rounded. */
+static SDL_Surface *make_poster(SDL_Surface *source, int width, int height, int radius) {
+    SDL_Surface *argb = SDL_ConvertSurfaceFormat(source, SDL_PIXELFORMAT_ARGB8888, 0);
+    if (!argb) return NULL;
+    double crop_w = argb->w, crop_h = argb->h;
+    if (crop_w * height > crop_h * width) {
+        crop_w = crop_h * width / height;
+    } else {
+        crop_h = crop_w * height / width;
+    }
+    pixelf_t *pixels = resample(argb, (argb->w - crop_w) / 2, (argb->h - crop_h) / 2, crop_w, crop_h,
+                                width, height);
+    SDL_FreeSurface(argb);
+    if (!pixels) return NULL;
+    SDL_Surface *result = SDL_CreateRGBSurfaceWithFormat(0, width, height, 32, SDL_PIXELFORMAT_ARGB8888);
+    if (result) {
+        /* Transparent art sits on the placeholder's surface color. */
+        const pixelf_t bg = hex_pixel(TV_SURFACE);
+        for (int y = 0; y < height; ++y) {
+            Uint32 *row = (Uint32 *) ((Uint8 *) result->pixels + y * result->pitch);
+            const pixelf_t *src = &pixels[y * width];
+            for (int x = 0; x < width; ++x) {
+                float keep = 1 - src[x].a;
+                row[x] = 0xFF000000u | pack_rgb(src[x].r + bg.r * keep, src[x].g + bg.g * keep, src[x].b + bg.b * keep);
+            }
+        }
+        round_corners(result, radius);
+    }
+    free(pixels);
+    return result;
+}
+
+/* Built small and stretched by the GPU: after this much blur, more pixels add nothing. */
+#define BACKDROP_SCALE 8
+#define BACKDROP_SATURATION 1.8f
+#define BACKDROP_BRIGHTNESS 0.9f
+
+typedef struct shade_stop_t {
+    float at, alpha;
+} shade_stop_t;
+
+/* Background-colored gradients over the art: from the top, from the bottom behind the shelf,
+ * and from the left behind the title. */
+static const shade_stop_t shade_top[] = {{0, .75f}, {.16f, 0}};
+static const shade_stop_t shade_bottom[] = {{0, .97f}, {.32f, .8f}, {.62f, 0}};
+static const shade_stop_t shade_left[] = {{0, .94f}, {.36f, .7f}, {.72f, .2f}, {1, .1f}};
+
+static float shade_alpha(const shade_stop_t *stops, int count, float at) {
+    if (at <= stops[0].at) return stops[0].alpha;
+    for (int i = 1; i < count; ++i) {
+        if (at <= stops[i].at) {
+            float f = (at - stops[i - 1].at) / (stops[i].at - stops[i - 1].at);
+            return stops[i - 1].alpha + (stops[i].alpha - stops[i - 1].alpha) * f;
+        }
+    }
+    return stops[count - 1].alpha;
+}
+
+/* One box pass along each line, transparent past the ends. */
+static void blur_lines(const pixelf_t *src, pixelf_t *dst, int len, int lines, int step, int line_step, int radius) {
+    float norm = 1.0f / (float) (2 * radius + 1);
+    for (int line = 0; line < lines; ++line) {
+        const pixelf_t *in = &src[line * line_step];
+        pixelf_t *out = &dst[line * line_step];
+        pixelf_t sum = {0, 0, 0, 0};
+        for (int i = 0; i < LV_MIN(radius, len); ++i) {
+            pixelf_add(&sum, &in[i * step], 1);
+        }
+        for (int i = 0; i < len; ++i) {
+            if (i + radius < len) pixelf_add(&sum, &in[(i + radius) * step], 1);
+            out[i * step] = (pixelf_t) {sum.r * norm, sum.g * norm, sum.b * norm, sum.a * norm};
+            if (i >= radius) pixelf_add(&sum, &in[(i - radius) * step], -1);
+        }
+    }
+}
+
+/* The hero's full-screen glow, as the mockup's CSS draws it: the art covers a box from 30% across to past
+ * the right edge, overhanging top and bottom ("center 30% / cover"), then blur(1/16 width), saturate(1.8),
+ * brightness(.9), over the background, under the shades. */
+static SDL_Surface *make_backdrop(SDL_Surface *source, int width, int height) {
+    int w = LV_MAX(width / BACKDROP_SCALE, 1), h = LV_MAX(height / BACKDROP_SCALE, 1);
+    /* Three box passes of this radius approximate a Gaussian of the same deviation. */
+    int radius = LV_MAX(w / 16, 1), margin = 3 * radius;
+    int canvas_w = w + 2 * margin, canvas_h = h + 2 * margin;
+    SDL_Surface *argb = SDL_ConvertSurfaceFormat(source, SDL_PIXELFORMAT_ARGB8888, 0);
+    if (!argb) return NULL;
+    double box_x = w * 0.3, box_y = h * -0.15, box_w = w * 0.8, box_h = h * 1.3;
+    double scale = LV_MAX(box_w / argb->w, box_h / argb->h);
+    double art_x = box_x + (box_w - argb->w * scale) / 2, art_y = box_y + (box_h - argb->h * scale) * 0.3;
+    int x0 = (int) lround(margin + box_x), x1 = (int) lround(margin + box_x + box_w);
+    int y0 = (int) lround(margin + box_y), y1 = (int) lround(margin + box_y + box_h);
+    pixelf_t *art = resample(argb, (x0 - margin - art_x) / scale, (y0 - margin - art_y) / scale,
+                             (x1 - x0) / scale, (y1 - y0) / scale, x1 - x0, y1 - y0);
+    SDL_FreeSurface(argb);
+    pixelf_t *canvas = calloc((size_t) canvas_w * canvas_h, sizeof(pixelf_t));
+    pixelf_t *scratch = malloc(sizeof(pixelf_t) * canvas_w * canvas_h);
+    subimage_info_t *info = SDL_malloc(sizeof(subimage_info_t));
+    SDL_Surface *result = SDL_CreateRGBSurfaceWithFormat(0, w, h, 32, SDL_PIXELFORMAT_RGB888);
+    if (art && canvas && scratch && info && result) {
+        for (int y = y0; y < y1; ++y) {
+            memcpy(&canvas[y * canvas_w + x0], &art[(y - y0) * (x1 - x0)], sizeof(pixelf_t) * (x1 - x0));
+        }
+        for (int pass = 0; pass < 3; ++pass) {
+            blur_lines(canvas, scratch, canvas_w, canvas_h, 1, canvas_w, radius);
+            blur_lines(scratch, canvas, canvas_h, canvas_w, canvas_w, 1, radius);
+        }
+        const pixelf_t bg = hex_pixel(TV_BACKGROUND);
+        const float s = BACKDROP_SATURATION;
+        for (int y = 0; y < h; ++y) {
+            float at = ((float) y + 0.5f) / (float) h;
+            float keep_y = (1 - shade_alpha(shade_top, 2, at)) * (1 - shade_alpha(shade_bottom, 3, 1 - at));
+            const pixelf_t *src = &canvas[(y + margin) * canvas_w + margin];
+            Uint32 *row = (Uint32 *) ((Uint8 *) result->pixels + y * result->pitch);
+            for (int x = 0; x < w; ++x) {
+                const pixelf_t *p = &src[x];
+                pixelf_t c = bg;
+                if (p->a > 0) {
+                    /* Graded on the art's own color, then laid over the background. */
+                    float r = p->r / p->a, g = p->g / p->a, b = p->b / p->a;
+                    float sr = (0.213f + 0.787f * s) * r + (0.715f - 0.715f * s) * g + (0.072f - 0.072f * s) * b;
+                    float sg = (0.213f - 0.213f * s) * r + (0.715f + 0.285f * s) * g + (0.072f - 0.072f * s) * b;
+                    float sb = (0.213f - 0.213f * s) * r + (0.715f - 0.715f * s) * g + (0.072f + 0.928f * s) * b;
+                    float k = BACKDROP_BRIGHTNESS * p->a;
+                    c.r = LV_CLAMP(0.0f, sr, 255.0f) * k + bg.r * (1 - p->a);
+                    c.g = LV_CLAMP(0.0f, sg, 255.0f) * k + bg.g * (1 - p->a);
+                    c.b = LV_CLAMP(0.0f, sb, 255.0f) * k + bg.b * (1 - p->a);
+                }
+                float keep = keep_y * (1 - shade_alpha(shade_left, 4, ((float) x + 0.5f) / (float) w));
+                row[x] = pack_rgb(bg.r + (c.r - bg.r) * keep, bg.g + (c.g - bg.g) * keep, bg.b + (c.b - bg.b) * keep);
+            }
+        }
+        /* Stretched over the whole target. */
+        info->w = width;
+        info->h = height;
+        info->rect = (SDL_Rect) {0, 0, 0, 0};
+        result->userdata = info;
+        info = NULL;
+    } else if (result) {
+        SDL_FreeSurface(result);
+        result = NULL;
+    }
+    SDL_free(info);
+    free(scratch);
+    free(canvas);
+    free(art);
     return result;
 }
 
@@ -492,9 +652,8 @@ static void coverloader_run_on_main(img_loader_t *loader, img_loader_run_on_main
 }
 
 static void img_loader_start_cb(coverloader_req_t *req) {
-    appitem_viewholder_t *holder = req->target->user_data;
-    img_set_cover(req->target, NULL);
-    lv_obj_add_flag(holder->title, LV_OBJ_FLAG_HIDDEN);
+    /* A backdrop keeps showing the previous art until the next one is ready. */
+    if (!req->backdrop) img_set_cover(req->target, NULL);
 }
 
 static void img_loader_result_cb(coverloader_req_t *req) {
@@ -505,13 +664,7 @@ static void img_loader_result_cb(coverloader_req_t *req) {
     }
 
     lv_obj_remove_event_cb(req->target, target_deleted_cb);
-    appitem_viewholder_t *holder = req->target->user_data;
     img_set_cover(req->target, req->src);
-    if (req->src && !holder->styles->show_title) {
-        lv_obj_add_flag(holder->title, LV_OBJ_FLAG_HIDDEN);
-    } else {
-        lv_obj_clear_flag(holder->title, LV_OBJ_FLAG_HIDDEN);
-    }
     done:
     loader->reqlist = reqlist_remove(loader->reqlist, req);
     coverloader_req_free(req);
@@ -551,9 +704,12 @@ static void img_set_cover(lv_obj_t *obj, memcache_item_t *src) {
         if (!skip_add_del_cb) {
             lv_obj_add_event_cb(obj, target_src_unlink_cb, LV_EVENT_DELETE, NULL);
         }
+        /* Loaded: the art shows instead of the placeholder. */
+        lv_obj_add_state(obj, LV_STATE_USER_1);
     } else {
         lv_img_set_src(obj, &holder->styles->defcover_src);
         lv_obj_remove_event_cb(obj, target_src_unlink_cb);
+        lv_obj_clear_state(obj, LV_STATE_USER_1);
     }
 }
 
@@ -575,13 +731,12 @@ static void memcache_item_free(memcache_item_t *item) {
         appitem_viewholder_t *holder = lv_obj_get_user_data(obj);
         lv_img_set_src(obj, &holder->styles->defcover_src);
         lv_obj_remove_event_cb(obj, target_src_unlink_cb);
-        lv_obj_clear_flag(holder->title, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_clear_state(obj, LV_STATE_USER_1);
     }
     SDL_DestroyTexture(item->data.data.texture);
 
     // Purge internal texture cache too
     purge_img_cache(ctx, item);
-    purge_corners_cache(ctx, item);
 
     /* unref all objs to this item */
     _lv_ll_clear(&item->objs);
@@ -598,23 +753,6 @@ static void purge_img_cache(lv_draw_sdl_ctx_t *ctx, const memcache_item_t *item)
     key_to_remove.header.type = LV_IMG_SRC_VARIABLE;
     key_to_remove.header.frame_id = 0;
     key_to_remove.src = &item->src;
-
-    lv_lru_remove(ctx->internals->texture_cache, &key_to_remove, sizeof(key_to_remove));
-}
-
-static void purge_corners_cache(lv_draw_sdl_ctx_t *ctx, const memcache_item_t *item) {
-    struct {
-        lv_sdl_cache_key_magic_t magic;
-        const SDL_Texture *texture;
-        lv_coord_t w, h, radius;
-    } key_to_remove;
-
-    memset(&key_to_remove, 0, sizeof(key_to_remove));
-    key_to_remove.magic = LV_GPU_CACHE_KEY_MAGIC_IMG_ROUNDED_CORNERS;
-    key_to_remove.texture = item->data.data.texture;
-    key_to_remove.w = item->target_width;
-    key_to_remove.h = item->target_height;
-    key_to_remove.radius = LV_MIN3(item->target_radius, item->target_width, item->target_height);
 
     lv_lru_remove(ctx->internals->texture_cache, &key_to_remove, sizeof(key_to_remove));
 }

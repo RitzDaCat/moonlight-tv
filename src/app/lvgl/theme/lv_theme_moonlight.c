@@ -5,6 +5,7 @@
 #include "util/font.h"
 #include "lvgl/ext/lv_child_group.h"
 #include "ui/tv_style.h"
+#include "lv_gridview.h"
 
 static lv_style_t knob_shadow;
 
@@ -52,10 +53,16 @@ const lv_font_t *lv_theme_moonlight_get_iconfont_small(lv_obj_t *obj) {
     return ((app_t *) th->user_data)->ui.fonts.icons.small;
 }
 
+const lv_font_t *lv_theme_moonlight_get_iconfont_display(lv_obj_t *obj) {
+    lv_theme_t *th = lv_theme_get_from_obj(obj);
+    return ((app_t *) th->user_data)->ui.fonts.icons.display;
+}
+
 static void apply_cb(lv_theme_t *theme, lv_obj_t *obj) {
     app_t *app = theme->user_data;
     bool set_font = true;
-    if (lv_obj_is_group_def(obj)) tv_focus_style(obj);
+    /* The shelf rings its focused poster, never itself. */
+    if (lv_obj_is_group_def(obj) && !lv_obj_check_type(obj, &lv_gridview_class)) tv_focus_style(obj);
     if (lv_obj_has_class(obj, &lv_btn_class)) {
         lv_obj_set_style_flex_cross_place(obj, LV_FLEX_ALIGN_CENTER, 0);
     }

@@ -218,6 +218,8 @@ int main(int argc, char **argv) {
     CHECK(lv_group_get_focused(launcher->detail_group) == apps->applist);
     button(&app, SDL_CONTROLLER_BUTTON_DPAD_RIGHT);
     CHECK(apps->featured_id == 2);
+    pump(&app, 10);
+    capture(&app, "shelf");
     button(&app, SDL_CONTROLLER_BUTTON_DPAD_UP);
     CHECK(lv_group_get_focused(launcher->detail_group) == apps->launch_btn);
     button(&app, SDL_CONTROLLER_BUTTON_DPAD_UP);

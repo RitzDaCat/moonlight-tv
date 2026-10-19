@@ -24,9 +24,10 @@ typedef struct launcher_fragment_t {
     lv_obj_t *nav;
     lv_obj_t *detail;
     lv_obj_t *pclist;
-    lv_obj_t *home_btn, *computers_btn, *host_btn, *host_label;
+    lv_obj_t *home_btn, *computers_btn, *host_btn, *host_dot, *host_label;
     lv_obj_t *computer_panel;
-    lv_obj_t *footer_hint;
+    /* Controller hint rows: [0] Xbox labels, [1] PlayStation shapes; select = the A/Cross caption. */
+    lv_obj_t *hints[2], *hint_select[2];
     lv_obj_t *split_btn, *add_btn, *pref_btn, *help_btn, *quit_btn;
     lv_group_t *nav_group, *detail_group, *host_group;
     lv_style_transition_dsc_t tr_nav;

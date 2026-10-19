@@ -13,3 +13,5 @@ const lv_font_t *lv_theme_moonlight_get_iconfont_large(lv_obj_t *obj);
 const lv_font_t *lv_theme_moonlight_get_iconfont_normal(lv_obj_t *obj);
 
 const lv_font_t *lv_theme_moonlight_get_iconfont_small(lv_obj_t *obj);
+
+const lv_font_t *lv_theme_moonlight_get_iconfont_display(lv_obj_t *obj);

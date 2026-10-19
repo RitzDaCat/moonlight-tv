@@ -9,12 +9,12 @@ typedef struct app_t app_t;
 
 typedef struct {
     lv_style_t cover;
+    lv_style_t cover_loaded;
+    lv_style_t cover_focused;
     lv_style_t btn;
-    lv_style_transition_dsc_t tr_pressed;
-    lv_style_transition_dsc_t tr_released;
     lv_img_dsc_t fav_indicator_src;
     lv_img_dsc_t defcover_src;
-    bool show_title;
+    const lv_font_t *placeholder_font;
 } appitem_styles_t;
 
 
@@ -38,7 +38,7 @@ typedef struct {
     lv_obj_t *applist, *appload, *apperror;
     lv_obj_t *errortitle, *errorhint, *errordetail;
     lv_obj_t *actions;
-    lv_obj_t *hero, *hero_image, *hero_title, *hero_subtitle;
+    lv_obj_t *hero, *hero_image, *hero_title;
     lv_obj_t *launch_btn, *launch_label, *options_btn, *shelf_title;
     int featured_id;
     appitem_styles_t hero_style;
@@ -68,3 +68,7 @@ typedef struct {
 extern const lv_fragment_class_t apps_controller_class;
 
 void apps_focus_primary(apps_fragment_t *controller);
+
+/* True when A on this detail-group object starts the featured game. */
+bool apps_focus_plays(apps_fragment_t *controller, lv_obj_t *focused);
+

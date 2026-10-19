@@ -14,6 +14,8 @@
 #include <assert.h>
 
 #include "lvgl/lv_ext_utils.h"
+#include "lvgl/font/material_icons_regular_symbols.h"
+#include "lvgl/theme/lv_theme_moonlight.h"
 #include "lvgl/util/lv_app_utils.h"
 #include "lv_gridview.h"
 
@@ -29,6 +31,14 @@ static void featured_key(lv_event_t *event);
 static void shelf_key(lv_event_t *event);
 static void shelf_focused(lv_event_t *event);
 static void set_featured(apps_fragment_t *controller, int app_id);
+static lv_obj_t *hero_pill(lv_obj_t *parent);
+static lv_obj_t *hero_pill_label(lv_obj_t *pill, const char *text);
+static void options_draw_dots(lv_event_t *event);
+static void focus_detail(apps_fragment_t *controller, lv_obj_t *target);
+
+/* Hero pills: white at 14% with a 16% hairline, as frosted glass over the backdrop. */
+#define HERO_PILL_OPA 36
+#define HERO_PILL_BORDER_OPA 41
 
 typedef void (*action_cb_t)(apps_fragment_t *controller, lv_obj_t *buttons, uint16_t index);
 
@@ -171,10 +181,7 @@ static void apps_controller_ctor(lv_fragment_t *self, void *args) {
     controller->apploader = apploader_create(arg->global, &controller->uuid, &controller->apploader_cb, controller);
 
     appitem_style_init(&controller->appitem_style);
-    controller->appitem_style.show_title = true;
     appitem_style_init(&controller->hero_style);
-    lv_style_set_radius(&controller->hero_style.cover, 0);
-    lv_style_set_outline_width(&controller->hero_style.cover, 0);
 }
 
 static void apps_controller_dtor(lv_fragment_t *self) {
@@ -200,87 +207,71 @@ static lv_obj_t *apps_view(lv_fragment_t *self, lv_obj_t *container) {
     lv_obj_remove_style_all(hero);
     lv_obj_clear_flag(hero, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_add_flag(hero, LV_OBJ_FLAG_EVENT_BUBBLE);
-    lv_obj_set_size(hero, LV_PCT(100), LV_PCT(64));
+    lv_obj_set_size(hero, LV_PCT(100), LV_PCT(100));
 
-    lv_obj_t *art = controller->hero_image = appitem_view(&controller->hero_style, 1, 1, hero);
-    lv_obj_clear_flag(art, LV_OBJ_FLAG_CLICKABLE | LV_OBJ_FLAG_EVENT_BUBBLE | LV_OBJ_FLAG_SCROLL_ON_FOCUS);
-    lv_obj_set_size(art, LV_PCT(66), LV_PCT(100));
-    lv_obj_align(art, LV_ALIGN_TOP_RIGHT, 0, 0);
-    appitem_viewholder_t *art_holder = lv_obj_get_user_data(art);
-    lv_obj_add_flag(art_holder->play_indicator, LV_OBJ_FLAG_HIDDEN);
-    lv_label_set_text_static(art_holder->title, "");
+    controller->hero_image = appitem_backdrop_view(&controller->hero_style, hero);
+    lv_obj_set_size(controller->hero_image, LV_PCT(100), LV_PCT(100));
 
     lv_obj_t *feature = lv_obj_create(hero);
     lv_obj_remove_style_all(feature);
     lv_obj_clear_flag(feature, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_add_flag(feature, LV_OBJ_FLAG_EVENT_BUBBLE);
-    lv_obj_set_pos(feature, LV_DPX(32), LV_DPX(64));
-    lv_obj_set_size(feature, LV_PCT(57), LV_SIZE_CONTENT);
+    lv_obj_set_pos(feature, TV_MARGIN, LV_DPX(98));
+    lv_obj_set_size(feature, LV_PCT(60), LV_SIZE_CONTENT);
     lv_obj_set_flex_flow(feature, LV_FLEX_FLOW_COLUMN);
-    lv_obj_set_style_pad_row(feature, LV_DPX(12), 0);
+    lv_obj_set_style_pad_row(feature, LV_DPX(20), 0);
     controller->hero_title = lv_label_create(feature);
     lv_obj_set_width(controller->hero_title, LV_PCT(100));
     lv_label_set_long_mode(controller->hero_title, LV_LABEL_LONG_DOT);
     lv_obj_set_style_text_font(controller->hero_title, controller->global->ui.fonts.fonts.display, 0);
     lv_label_set_text(controller->hero_title, locstr("Your games, on the big screen"));
-    controller->hero_subtitle = lv_label_create(feature);
-    lv_obj_set_width(controller->hero_subtitle, LV_PCT(100));
-    lv_label_set_long_mode(controller->hero_subtitle, LV_LABEL_LONG_DOT);
-    lv_obj_set_style_text_color(controller->hero_subtitle, lv_color_hex(TV_MUTED), 0);
-    lv_label_set_text_static(controller->hero_subtitle, "");
 
     lv_obj_t *primary_actions = lv_obj_create(feature);
     lv_obj_remove_style_all(primary_actions);
     lv_obj_add_flag(primary_actions, LV_OBJ_FLAG_EVENT_BUBBLE);
-    lv_obj_set_size(primary_actions, LV_PCT(100), LV_DPX(46));
-    lv_obj_set_style_pad_all(primary_actions, LV_DPX(4), 0);
-    lv_obj_set_style_pad_column(primary_actions, LV_DPX(16), 0);
+    lv_obj_set_size(primary_actions, LV_SIZE_CONTENT, LV_SIZE_CONTENT);
+    lv_obj_set_style_pad_column(primary_actions, LV_DPX(10), 0);
     lv_obj_set_flex_flow(primary_actions, LV_FLEX_FLOW_ROW);
-    lv_obj_t *launch = controller->launch_btn = lv_btn_create(primary_actions);
-    lv_obj_set_size(launch, LV_DPX(190), LV_PCT(100));
-    lv_obj_add_flag(launch, LV_OBJ_FLAG_EVENT_BUBBLE);
-    lv_obj_set_style_bg_color(launch, lv_color_hex(0x299bfa), 0);
-    lv_obj_set_style_text_color(launch, lv_color_hex(0x06101a), 0);
-    lv_obj_set_style_radius(launch, LV_DPX(6), 0);
-    lv_obj_set_style_shadow_width(launch, 0, 0);
-    tv_focus_style(launch);
-    lv_obj_set_style_outline_color(launch, lv_color_white(), LV_STATE_FOCUS_KEY);
-    controller->launch_label = lv_label_create(launch);
-    lv_label_set_text_static(controller->launch_label, locstr("Launch game"));
-    lv_obj_center(controller->launch_label);
+
+    lv_obj_t *launch = controller->launch_btn = hero_pill(primary_actions);
+    lv_obj_t *play_icon = lv_label_create(launch);
+    lv_obj_set_style_text_font(play_icon, lv_theme_moonlight_get_iconfont_small(launch), 0);
+    lv_label_set_text_static(play_icon, MAT_SYMBOL_PLAY_ARROW);
+    controller->launch_label = hero_pill_label(launch, locstr("Play"));
     lv_obj_add_event_cb(launch, featured_click, LV_EVENT_CLICKED, controller);
     lv_obj_add_event_cb(launch, featured_key, LV_EVENT_KEY, controller);
 
-    lv_obj_t *options = controller->options_btn = lv_btn_create(primary_actions);
-    lv_obj_add_flag(options, LV_OBJ_FLAG_EVENT_BUBBLE);
-    lv_obj_set_size(options, LV_SIZE_CONTENT, LV_PCT(100));
-    lv_obj_set_style_bg_opa(options, LV_OPA_TRANSP, 0);
-    lv_obj_set_style_shadow_width(options, 0, 0);
-    lv_obj_set_style_text_color(options, lv_color_hex(TV_MUTED), 0);
-    tv_focus_style(options);
-    lv_obj_t *options_label = lv_label_create(options);
-    lv_label_set_text_static(options_label, locstr("Game options"));
-    lv_obj_center(options_label);
+    lv_obj_t *options = controller->options_btn = hero_pill(primary_actions);
+    lv_obj_t *dots = lv_obj_create(options);
+    lv_obj_remove_style_all(dots);
+    lv_obj_clear_flag(dots, LV_OBJ_FLAG_CLICKABLE | LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_size(dots, LV_DPX(12), LV_DPX(6));
+    lv_obj_add_event_cb(dots, options_draw_dots, LV_EVENT_DRAW_MAIN, NULL);
+    hero_pill_label(options, locstr("Options"));
     lv_obj_add_event_cb(options, featured_options, LV_EVENT_CLICKED, controller);
     lv_obj_add_event_cb(options, featured_key, LV_EVENT_KEY, controller);
 
     controller->shelf_title = lv_label_create(view);
     lv_label_set_text_static(controller->shelf_title, locstr("Games & apps"));
-    lv_obj_set_style_text_font(controller->shelf_title, lv_theme_get_font_large(view), 0);
-    lv_obj_set_pos(controller->shelf_title, LV_DPX(32), LV_PCT(58));
+    lv_obj_set_style_text_font(controller->shelf_title, lv_theme_get_font_small(view), 0);
+    lv_obj_set_style_text_color(controller->shelf_title, lv_color_hex(TV_MUTED), 0);
+    lv_obj_set_pos(controller->shelf_title, TV_MARGIN, LV_DPX(244));
 
+    /* One row of posters in view; moving down snaps the next row into the same place. */
     lv_obj_t *applist = controller->applist = lv_gridview_create(view);
     lv_obj_add_flag(applist, LV_OBJ_FLAG_EVENT_BUBBLE);
     lv_obj_set_scroll_dir(applist, LV_DIR_VER);
-    lv_obj_set_scrollbar_mode(applist, LV_SCROLLBAR_MODE_ACTIVE);
-    lv_obj_set_style_pad_hor(applist, LV_DPX(32), 0);
-    lv_obj_set_style_pad_ver(applist, LV_DPX(7), 0);
-    lv_obj_set_style_pad_gap(applist, LV_DPX(12), 0);
+    lv_obj_set_scroll_snap_y(applist, LV_SCROLL_SNAP_START);
+    lv_obj_set_scrollbar_mode(applist, LV_SCROLLBAR_MODE_OFF);
+    lv_obj_set_style_pad_hor(applist, TV_MARGIN, 0);
+    lv_obj_set_style_pad_top(applist, LV_DPX(14), 0);
+    lv_obj_set_style_pad_bottom(applist, LV_DPX(4), 0);
+    lv_obj_set_style_pad_gap(applist, LV_DPX(22), 0);
     lv_obj_set_style_radius(applist, 0, 0);
     lv_obj_set_style_border_width(applist, 0, 0);
     lv_obj_set_style_bg_opa(applist, LV_OPA_TRANSP, 0);
-    lv_obj_set_pos(applist, 0, LV_PCT(63));
-    lv_obj_set_size(applist, LV_PCT(100), LV_PCT(37));
+    lv_obj_set_pos(applist, 0, LV_DPX(260));
+    lv_obj_set_size(applist, LV_PCT(100), LV_DPX(227));
     lv_gridview_set_adapter(applist, &apps_adapter);
     lv_obj_add_event_cb(applist, shelf_key, LV_EVENT_KEY, controller);
     lv_obj_add_event_cb(applist, shelf_focused, LV_EVENT_FOCUSED, controller);
@@ -323,6 +314,57 @@ static lv_obj_t *apps_view(lv_fragment_t *self, lv_obj_t *container) {
     return view;
 }
 
+static lv_obj_t *hero_pill(lv_obj_t *parent) {
+    lv_obj_t *pill = lv_btn_create(parent);
+    tv_pill_style(pill, HERO_PILL_OPA);
+    lv_obj_set_style_border_width(pill, 1, 0);
+    lv_obj_set_style_border_color(pill, lv_color_hex(TV_TEXT), 0);
+    lv_obj_set_style_border_opa(pill, HERO_PILL_BORDER_OPA, 0);
+    lv_obj_set_size(pill, LV_SIZE_CONTENT, LV_DPX(32));
+    lv_obj_set_style_pad_left(pill, LV_DPX(14), 0);
+    lv_obj_set_style_pad_right(pill, LV_DPX(17), 0);
+    lv_obj_set_style_pad_column(pill, LV_DPX(7), 0);
+    lv_obj_set_flex_flow(pill, LV_FLEX_FLOW_ROW);
+    lv_obj_set_flex_align(pill, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    lv_obj_add_flag(pill, LV_OBJ_FLAG_EVENT_BUBBLE);
+    return pill;
+}
+
+static lv_obj_t *hero_pill_label(lv_obj_t *pill, const char *text) {
+    lv_obj_t *label = lv_label_create(pill);
+    lv_obj_set_style_text_font(label, lv_theme_get_font_small(pill), 0);
+    lv_label_set_text_static(label, text);
+    return label;
+}
+
+/* The icon font has no "more" glyph: three dots in the pill's text color. */
+static void options_draw_dots(lv_event_t *event) {
+    lv_obj_t *dots = lv_event_get_target(event);
+    lv_draw_rect_dsc_t dsc;
+    lv_draw_rect_dsc_init(&dsc);
+    dsc.radius = LV_RADIUS_CIRCLE;
+    dsc.bg_color = lv_obj_get_style_text_color(dots, LV_PART_MAIN);
+    lv_coord_t step = lv_obj_get_width(dots) / 3;
+    lv_coord_t r = step * 5 / 16;
+    lv_coord_t cy = (dots->coords.y1 + dots->coords.y2) / 2;
+    for (int i = 0; i < 3; i++) {
+        lv_coord_t cx = dots->coords.x1 + step / 2 + i * step;
+        lv_area_t dot = {cx - r, cy - r, cx + r, cy + r};
+        lv_draw_rect(lv_event_get_draw_ctx(event), &dsc, &dot);
+    }
+}
+
+/* Focus inside the apps page; the ring only shows while the page has the input. */
+static void focus_detail(apps_fragment_t *controller, lv_obj_t *target) {
+    launcher_fragment_t *parent = (launcher_fragment_t *) lv_fragment_get_parent(&controller->base);
+    lv_group_focus_obj(target);
+    if (app_input_get_group(&controller->global->ui.input) == parent->detail_group) {
+        lv_obj_add_state(target, LV_STATE_FOCUS_KEY);
+    } else {
+        lv_obj_clear_state(target, LV_STATE_FOCUSED | LV_STATE_FOCUS_KEY);
+    }
+}
+
 static void on_view_created(lv_fragment_t *self, lv_obj_t *view) {
     LV_UNUSED(view);
     apps_fragment_t *controller = (apps_fragment_t *) self;
@@ -360,19 +402,21 @@ static void obj_will_delete(lv_fragment_t *self, lv_obj_t *obj) {
 static void update_grid_config(apps_fragment_t *controller) {
     lv_obj_t *applist = controller->applist;
     lv_obj_update_layout(applist);
-    lv_coord_t applist_width = lv_obj_get_width(applist);
-    int col_count = LV_CLAMP(1, applist_width / lv_dpx(210), 4);
-    lv_coord_t col_width = (applist_width - lv_obj_get_style_pad_left(applist, 0) -
-                            lv_obj_get_style_pad_right(applist, 0) -
-                            lv_obj_get_style_pad_column(applist, 0) * (col_count - 1)) / col_count;
+    lv_coord_t gap = lv_obj_get_style_pad_column(applist, 0);
+    lv_coord_t content_width = lv_obj_get_width(applist) - lv_obj_get_style_pad_left(applist, 0) -
+                               lv_obj_get_style_pad_right(applist, 0);
+    /* 3:4 posters about 240 px wide at 1080p, as many as fit. */
+    int col_count = LV_MAX(1, (content_width + gap) / (LV_DPX(120) + gap));
+    lv_coord_t col_width = (content_width - gap * (col_count - 1)) / col_count;
+    lv_coord_t col_height = col_width * 4 / 3;
     controller->col_count = col_count;
     controller->col_width = col_width;
-    lv_coord_t row_height = col_width * 9 / 16;
-    controller->col_height = row_height;
-    lv_gridview_set_config(applist, col_count, row_height, LV_GRID_ALIGN_CENTER, LV_GRID_ALIGN_CENTER);
+    controller->col_height = col_height;
+    lv_gridview_set_config(applist, col_count, col_height + appitem_caption_height(applist),
+                           LV_GRID_ALIGN_START, LV_GRID_ALIGN_START);
 
     controller->appitem_style.defcover_src.header.w = col_width;
-    controller->appitem_style.defcover_src.header.h = row_height;
+    controller->appitem_style.defcover_src.header.h = col_height;
     lv_obj_update_layout(controller->hero_image);
     controller->hero_style.defcover_src.header.w = lv_obj_get_width(controller->hero_image);
     controller->hero_style.defcover_src.header.h = lv_obj_get_height(controller->hero_image);
@@ -488,8 +532,7 @@ static void update_view_state(apps_fragment_t *controller) {
                                controller->apploader_error);
 
                     set_actions(controller, action_labels_error, action_callbacks_error);
-                    lv_group_focus_obj(controller->actions);
-                    lv_obj_add_state(controller->actions, LV_STATE_FOCUS_KEY);
+                    focus_detail(controller, controller->actions);
                     break;
                 }
                 case APPLOADER_STATE_IDLE: {
@@ -512,8 +555,7 @@ static void update_view_state(apps_fragment_t *controller) {
                        NULL);
 
             set_actions(controller, actions_unpaired, action_callbacks_unpaired);
-            lv_group_focus_obj(controller->actions);
-            lv_obj_add_state(controller->actions, LV_STATE_FOCUS_KEY);
+            focus_detail(controller, controller->actions);
             break;
         }
         case SERVER_STATE_ERROR: {
@@ -523,8 +565,7 @@ static void update_view_state(apps_fragment_t *controller) {
                        state->error.errmsg);
 
             set_actions(controller, action_labels_error, action_callbacks_error);
-            lv_group_focus_obj(controller->actions);
-            lv_obj_add_state(controller->actions, LV_STATE_FOCUS_KEY);
+            focus_detail(controller, controller->actions);
             break;
         }
         case SERVER_STATE_OFFLINE: {
@@ -537,8 +578,7 @@ static void update_view_state(apps_fragment_t *controller) {
 
             set_actions(controller, action_labels_offline, action_callbacks_offline);
             lv_btnmatrix_clear_btn_ctrl(controller->actions, 0, LV_BTNMATRIX_CTRL_DISABLED);
-            lv_group_focus_obj(controller->actions);
-            lv_obj_add_state(controller->actions, LV_STATE_FOCUS_KEY);
+            focus_detail(controller, controller->actions);
             break;
         }
         default: {
@@ -557,8 +597,7 @@ static void show_progress(apps_fragment_t *fragment) {
     lv_obj_add_flag(fragment->actions, LV_OBJ_FLAG_HIDDEN);
     lv_obj_add_state(fragment->actions, LV_STATE_DISABLED);
 
-    lv_group_focus_obj(fragment->appload);
-    lv_obj_add_state(fragment->appload, LV_STATE_FOCUS_KEY);
+    focus_detail(fragment, fragment->appload);
 }
 
 static void show_ok(apps_fragment_t *fragment) {
@@ -754,14 +793,21 @@ static void applist_focus_enter(lv_event_t *event) {
     if (event->target != event->current_target) { return; }
     apps_fragment_t *controller = lv_event_get_user_data(event);
     if (!controller->base.managed || controller->base.managed->destroying_obj) return;
-    lv_gridview_focus(controller->applist, controller->focus_backup);
+    lv_obj_t *applist = controller->applist;
+    lv_gridview_focus(applist, controller->focus_backup);
+    /* Focused from code there is no active input device, so the item can't tell it got key focus. */
+    if (lv_indev_get_act() || !lv_obj_has_state(applist, LV_STATE_FOCUS_KEY)) return;
+    lv_obj_t *item = lv_gridview_get_item_view(applist, lv_gridview_get_focused_index(applist));
+    if (item) lv_event_send(item, LV_EVENT_FOCUSED, lv_event_get_indev(event));
 }
 
 static void applist_focus_leave(lv_event_t *event) {
     if (event->target != event->current_target) { return; }
     apps_fragment_t *controller = lv_event_get_user_data(event);
     if (!controller->base.managed || controller->base.managed->destroying_obj) return;
-    controller->focus_backup = lv_gridview_get_focused_index(controller->applist);
+    /* Leaving twice (blur, then the next focus) must not lose the position. */
+    int focused = lv_gridview_get_focused_index(controller->applist);
+    if (focused >= 0) controller->focus_backup = focused;
     lv_gridview_focus(controller->applist, -1);
 }
 
@@ -770,8 +816,11 @@ void apps_focus_primary(apps_fragment_t *controller) {
     if (!lv_obj_has_flag(controller->apperror, LV_OBJ_FLAG_HIDDEN)) target = controller->actions;
     else if (!lv_obj_has_flag(controller->appload, LV_OBJ_FLAG_HIDDEN)) target = controller->appload;
     else if (lv_obj_has_state(target, LV_STATE_DISABLED)) target = controller->options_btn;
-    lv_group_focus_obj(target);
-    lv_obj_add_state(target, LV_STATE_FOCUS_KEY);
+    focus_detail(controller, target);
+}
+
+bool apps_focus_plays(apps_fragment_t *controller, lv_obj_t *focused) {
+    return focused == controller->launch_btn || focused == controller->applist;
 }
 
 static void set_featured(apps_fragment_t *controller, int app_id) {
@@ -785,12 +834,8 @@ static void set_featured(apps_fragment_t *controller, int app_id) {
         app = &controller->apploader_apps->items[0];
     }
     lv_label_set_text(controller->hero_title, app->base.name);
-    const pclist_t *host = pcmanager_node(pcmanager, &controller->uuid);
-    lv_label_set_text_fmt(controller->hero_subtitle, locstr("Stream from %s"),
-                         host && host->server ? host->server->hostname : "");
     int current = pcmanager_server_current_app(pcmanager, &controller->uuid);
-    lv_label_set_text_static(controller->launch_label,
-                            current == app->base.id ? locstr("Resume game") : locstr("Launch game"));
+    lv_label_set_text_static(controller->launch_label, current == app->base.id ? locstr("Resume") : locstr("Play"));
     if (current && current != app->base.id) lv_obj_add_state(controller->launch_btn, LV_STATE_DISABLED);
     else lv_obj_clear_state(controller->launch_btn, LV_STATE_DISABLED);
     if (controller->featured_id == app->base.id || !controller->coverloader) return;

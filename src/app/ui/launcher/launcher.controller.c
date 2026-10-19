@@ -15,7 +15,6 @@
 
 #include "lvgl/font/material_icons_regular_symbols.h"
 #include "lvgl/util/lv_app_utils.h"
-#include "lv_gridview.h"
 
 #include "util/font.h"
 #include "util/i18n.h"
@@ -91,6 +90,7 @@ static void computer_key(lv_event_t *event);
 static void computer_cancel(lv_event_t *event);
 static void section_key(lv_event_t *event);
 static void update_header(launcher_fragment_t *controller);
+static void update_select_hint(launcher_fragment_t *controller);
 
 const lv_fragment_class_t launcher_controller_class = {
         .constructor_cb = launcher_controller,
@@ -183,7 +183,7 @@ static void launcher_view_init(lv_fragment_t *self, lv_obj_t *view) {
     lv_obj_add_event_cb(fragment->add_btn, open_manual_add, LV_EVENT_CLICKED, fragment);
     lv_obj_add_event_cb(fragment->pref_btn, open_settings, LV_EVENT_CLICKED, fragment);
 #if FEATURE_SPLIT_SCREEN
-    lv_obj_add_event_cb(fragment->split_btn, open_split_screen, LV_EVENT_CLICKED, fragment);
+    if (fragment->split_btn) lv_obj_add_event_cb(fragment->split_btn, open_split_screen, LV_EVENT_CLICKED, fragment);
 #endif
     lv_obj_add_event_cb(fragment->help_btn, open_help, LV_EVENT_CLICKED, fragment);
     lv_obj_add_event_cb(fragment->quit_btn, app_quit_confirm, LV_EVENT_CLICKED, fragment);
@@ -420,7 +420,11 @@ static const char *server_item_icon(const pclist_t *node) {
 
 static void cb_detail_focused(lv_event_t *event) {
     launcher_fragment_t *fragment = lv_event_get_user_data(event);
-    if (!fragment->pane_initialized || fragment->detail_changing || fragment->detail_opened) { return; }
+    if (fragment->detail_opened) {
+        update_select_hint(fragment);
+        return;
+    }
+    if (!fragment->pane_initialized || fragment->detail_changing) { return; }
     lv_fragment_t *detail_fragment = lv_fragment_manager_find_by_container(fragment->base.child_manager,
                                                                            fragment->detail);
     if (!detail_fragment || event->target == fragment->detail) { return; }
@@ -463,35 +467,33 @@ static void cb_nav_key(lv_event_t *event) {
     }
 }
 
+/* The keypad changes groups without focus events: blur the group being left so only one ring shows. */
+static void group_blur(lv_group_t *group) {
+    lv_obj_t *focused = lv_group_get_focused(group);
+    if (focused && lv_obj_has_state(focused, LV_STATE_FOCUSED)) lv_event_send(focused, LV_EVENT_DEFOCUSED, NULL);
+}
+
+static void group_enter(launcher_fragment_t *controller, lv_group_t *group) {
+    app_input_set_group(&controller->global->ui.input, group);
+    lv_obj_t *focused = lv_group_get_focused(group);
+    if (focused && !lv_obj_has_state(focused, LV_STATE_FOCUSED)) lv_group_focus_obj(focused);
+}
+
 static void set_detail_opened(launcher_fragment_t *controller, bool opened) {
     /* Focus events bubble synchronously, including the grid's item focus events. */
     controller->detail_opened = opened;
-    bool key = app_ui_get_input_mode(&controller->global->ui.input) & UI_INPUT_MODE_BUTTON_FLAG;
     if (opened) {
         lv_obj_add_flag(controller->computer_panel, LV_OBJ_FLAG_HIDDEN);
         controller->computers_opened = false;
         lv_obj_clear_state(controller->computers_btn, LV_STATE_CHECKED);
         lv_obj_add_state(controller->home_btn, LV_STATE_CHECKED);
-        app_input_set_group(&controller->global->ui.input, controller->detail_group);
-        lv_obj_t *detail_focused = lv_group_get_focused(controller->detail_group);
-        if (key && detail_focused) {
-            if (lv_obj_check_type(detail_focused, &lv_gridview_class)) {
-                int index = lv_gridview_get_focused_index(detail_focused);
-                lv_gridview_focus(detail_focused, index);
-            } else {
-                lv_obj_add_state(detail_focused, LV_STATE_FOCUS_KEY);
-            }
-        }
+        group_blur(controller->nav_group);
     } else {
-        app_input_set_group(&controller->global->ui.input, controller->nav_group);
-        if (key) {
-            lv_obj_t *nav_focused = lv_group_get_focused(controller->nav_group);
-            if (nav_focused) {
-                lv_obj_add_state(nav_focused, LV_STATE_FOCUS_KEY);
-            }
-        }
+        group_blur(controller->detail_group);
     }
-    controller->detail_opened = opened;
+    group_blur(controller->host_group);
+    group_enter(controller, opened ? controller->detail_group : controller->nav_group);
+    update_select_hint(controller);
 }
 
 void launcher_focus_navigation(launcher_fragment_t *controller) {
@@ -526,7 +528,10 @@ static void show_computers(launcher_fragment_t *controller) {
     lv_obj_clear_flag(controller->computer_panel, LV_OBJ_FLAG_HIDDEN);
     lv_obj_clear_state(controller->home_btn, LV_STATE_CHECKED);
     lv_obj_add_state(controller->computers_btn, LV_STATE_CHECKED);
+    group_blur(controller->nav_group);
+    group_blur(controller->detail_group);
     app_input_set_group(&controller->global->ui.input, controller->host_group);
+    update_select_hint(controller);
     lv_obj_t *selected = controller->add_btn;
     for (uint32_t i = 0; i < lv_obj_get_child_cnt(controller->pclist); ++i) {
         lv_obj_t *host = lv_obj_get_child(controller->pclist, i);
@@ -570,34 +575,54 @@ static void update_header(launcher_fragment_t *controller) {
     for (const pclist_t *node = pcmanager_servers(pcmanager); node; node = node->next) {
         if (node->selected) { selected = node; break; }
     }
+    uint32_t dot = TV_MUTED;
     if (!selected) {
-        lv_label_set_text(controller->host_label, locstr("Choose computer"));
-        return;
+        lv_label_set_text_static(controller->host_label, locstr("Choose computer"));
+    } else {
+        const char *status = locstr("Checking");
+        switch (selected->state.code) {
+            case SERVER_STATE_AVAILABLE: dot = TV_ONLINE; status = NULL; break;
+            case SERVER_STATE_NOT_PAIRED: dot = TV_WARNING; status = locstr("Pair"); break;
+            case SERVER_STATE_OFFLINE: dot = TV_ERROR; status = locstr("Offline"); break;
+            case SERVER_STATE_ERROR: dot = TV_ERROR; status = locstr("Error"); break;
+            default: break;
+        }
+        if (status) lv_label_set_text_fmt(controller->host_label, "%s · %s", selected->server->hostname, status);
+        else lv_label_set_text(controller->host_label, selected->server->hostname);
     }
-    const char *status = locstr("Checking");
-    switch (selected->state.code) {
-        case SERVER_STATE_AVAILABLE: status = locstr("Online"); break;
-        case SERVER_STATE_NOT_PAIRED: status = locstr("Pair"); break;
-        case SERVER_STATE_OFFLINE: status = locstr("Offline"); break;
-        case SERVER_STATE_ERROR: status = locstr("Error"); break;
-        default: break;
-    }
-    lv_label_set_text_fmt(controller->host_label, "%s  ·  %s", selected->server->hostname, status);
-    const char *hints = locstr("D-pad / stick  Move     A  Select     B  Back     LB / RB  Sections     X  Options");
+    lv_obj_set_style_bg_color(controller->host_dot, lv_color_hex(dot), 0);
+    bool playstation = false;
 #if SDL_VERSION_ATLEAST(2, 0, 12)
     for (size_t i = 0; i < controller->global->input.max_num_gamepads; ++i) {
         const app_gamepad_state_t *pad = app_input_gamepad_state_by_index(&controller->global->input, (int) i);
         if (!pad || !pad->controller) continue;
         SDL_GameControllerType type = SDL_GameControllerGetType(pad->controller);
-        if (type == SDL_CONTROLLER_TYPE_PS3 || type == SDL_CONTROLLER_TYPE_PS4
+        playstation = type == SDL_CONTROLLER_TYPE_PS3 || type == SDL_CONTROLLER_TYPE_PS4
 #if SDL_VERSION_ATLEAST(2, 0, 14)
-            || type == SDL_CONTROLLER_TYPE_PS5
+                      || type == SDL_CONTROLLER_TYPE_PS5
 #endif
-        ) hints = locstr("D-pad / stick  Move     Cross  Select     Circle  Back     L1 / R1  Sections     Square  Options");
+                ;
         break;
     }
 #endif
-    lv_label_set_text_static(controller->footer_hint, hints);
+    lv_obj_add_flag(controller->hints[!playstation], LV_OBJ_FLAG_HIDDEN);
+    lv_obj_clear_flag(controller->hints[playstation], LV_OBJ_FLAG_HIDDEN);
+}
+
+/* The A/Cross caption: Play on the featured button and the shelf, Select elsewhere. */
+static void update_select_hint(launcher_fragment_t *controller) {
+    const char *text = locstr("Select");
+    if (controller->detail_opened) {
+        lv_fragment_t *detail = lv_fragment_manager_find_by_container(controller->base.child_manager,
+                                                                      controller->detail);
+        lv_obj_t *focused = lv_group_get_focused(controller->detail_group);
+        if (detail && focused && apps_focus_plays((apps_fragment_t *) detail, focused)) text = locstr("Play");
+    }
+    for (int i = 0; i < 2; ++i) {
+        if (lv_label_get_text(controller->hint_select[i]) != text) {
+            lv_label_set_text_static(controller->hint_select[i], text);
+        }
+    }
 }
 
 static void open_manual_add(lv_event_t *event) {
