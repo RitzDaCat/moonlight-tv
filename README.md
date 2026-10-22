@@ -4,6 +4,26 @@ Patched Moonlight TV client for LG webOS focused on decoder latency experiments,
 with a redesigned launcher, stream controls, and experimental two-host split screen.
 Forked from [mariotaku/moonlight-tv](https://github.com/mariotaku/moonlight-tv).
 
+## Screenshots
+
+Native previews of the current TV interface, rendered with demo PC/game data.
+Game cards and artwork are examples; your paired PC supplies your own library.
+
+**Launcher and game library**
+
+![Moonlight TV launcher with game posters and controller navigation](docs/screenshots/launcher.png)
+
+| PC selection | Stream settings |
+| --- | --- |
+| ![Computer picker with a demo PC and Add computer action](docs/screenshots/computers.png) | ![Resolution, frame rate, bitrate, and language settings](docs/screenshots/settings.png) |
+
+**Stream audio and performance overlay**
+
+![Per-player audio controls and decoder diagnostics panel](docs/screenshots/stream-controls.png)
+
+The overlay is a layout preview. Its performance values are placeholders, not
+measured latency or TV playback results.
+
 ## Download and install
 
 Download the ARM `.ipk` from [Releases](https://github.com/RitzDaCat/moonlight-tv/releases).

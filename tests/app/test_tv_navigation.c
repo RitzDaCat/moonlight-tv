@@ -244,6 +244,7 @@ int main(int argc, char **argv) {
     button(&app, SDL_CONTROLLER_BUTTON_A);
     settings_controller_t *settings = (settings_controller_t *) lv_fragment_manager_get_top(app.ui.fm);
     CHECK(settings->base.cls == &settings_controller_cls);
+    capture(&app, "settings-basic");
     for (int i = 0; i < 6; ++i) {
         if (lv_group_get_obj_count(settings->detail_group)) {
             button(&app, SDL_CONTROLLER_BUTTON_DPAD_RIGHT);
