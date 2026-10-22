@@ -1,0 +1,23 @@
+name: Windows host setup checks
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  windows-host:
+    runs-on: windows-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - name: Windows PowerShell 5.1 checks
+        shell: powershell
+        run: ./host/installer/windows/test-windows-host.ps1
+      - name: PowerShell 7 checks
+        shell: pwsh
+        run: ./host/installer/windows/test-windows-host.ps1
+      - name: CMD launcher plan
+        shell: cmd
+        run: host\installer\windows\install-host.cmd plan
