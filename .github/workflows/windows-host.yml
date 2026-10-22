@@ -21,3 +21,9 @@ jobs:
       - name: CMD launcher plan
         shell: cmd
         run: host\installer\windows\install-host.cmd plan
+      - name: Read-only Windows host doctor
+        shell: cmd
+        run: host\installer\windows\install-host.cmd doctor
+      - name: Build Windows helper package
+        shell: pwsh
+        run: python host/installer/build_windows_package.py --output build/codex-windows-ci

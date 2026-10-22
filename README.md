@@ -26,6 +26,8 @@ measured latency or TV playback results.
 
 ## Download and install
 
+### LG webOS TV
+
 Download the ARM `.ipk` from [Releases](https://github.com/RitzDaCat/moonlight-tv/releases).
 Install it using [webOS Dev Manager](https://github.com/webosbrew/dev-manager-desktop)
 with Developer Mode enabled on your TV, or an already configured webOS CLI:
@@ -41,10 +43,20 @@ certificates, local configuration, and captured logs are not release assets.
 
 Game cards and artwork come from the apps configured on your own paired Sunshine
 host. This fork does not bundle a personal game library, custom game artwork,
-host address, or pairing state. On CachyOS/Arch, the optional
-[PC setup](host/installer/README.md) configures the current desktop user's PC.
-On other systems, install Sunshine using its upstream instructions and pair
-your own host normally.
+host address, or pairing state.
+
+### Windows PC
+
+Download [Windows host setup](https://github.com/RitzDaCat/moonlight-tv/releases/download/v1.6.45/moonlight-tv-windows-host-setup.zip),
+use **Extract All**, and double-click **install-host.cmd** on the PC running your
+games. It uses official Sunshine and opens that PC's local setup page. Follow the
+[Windows installation, controller, and TV pairing steps](host/installer/windows/README.md).
+An existing Sunshine host is retained; the decoder patches are in the TV app.
+
+### CachyOS or Arch Linux PC
+
+Use the [Linux PC setup](host/installer/README.md#cachyos-or-arch-linux-pc).
+It configures the current desktop user's PC using the distribution's Sunshine package.
 
 ## Decoder latency patches
 
@@ -70,7 +82,7 @@ sleep polling. No universal latency reduction is claimed.
 - Separate **Split screen** page to select games from two paired PCs.
 - Independent audio gain and mute controls, saved preferences, and short gain ramps.
 - Stream input, statistics, controller touchpad, and sender wake-up changes.
-- Sunshine source patches, a CachyOS/Arch host installer, and diagnostic tools in
+- Sunshine source patches, Windows and CachyOS/Arch host setup, and diagnostic tools in
   [`host/`](host/README.md).
 
 Split screen uses two independent Sunshine hosts; each PC runs its own game and

@@ -1,10 +1,21 @@
 # LG TV streaming host setup
 
-Host integration for CachyOS and Arch Linux. Each PC runs its own game, GPU
+Host setup for Windows 10/11 and CachyOS/Arch Linux. Each PC runs its own game, GPU
 encoder and Sunshine session. The Moonlight TV client owns layout and per-player
 audio controls; games synchronize through their normal LAN/online multiplayer.
 
-## Install on the second PC
+## Windows PC
+
+Follow the [Windows setup and pairing guide](windows/README.md). Download
+[moonlight-tv-windows-host-setup.zip](https://github.com/RitzDaCat/moonlight-tv/releases/download/v1.6.45/moonlight-tv-windows-host-setup.zip),
+extract it, and double-click `install-host.cmd`. It installs official Sunshine
+through WinGet when needed and opens this PC's local web UI. Existing Sunshine
+settings, game entries, pairing, and service state are retained.
+
+The guide also covers manual MSI installation, controller drivers, pairing,
+readiness checks, and removal. The Windows helper does not apply Linux host patches.
+
+## CachyOS or Arch Linux PC
 
 Download the native package from this repository's Releases page. From that PC's
 graphical desktop, run:
@@ -60,7 +71,7 @@ The helper follows active Sunshine capture and routes Steam-owned playback to it
 Xwayland focus handoff uses window-manager requests. Native Wayland focus, games
 outside Steam, and target-PC controller/audio behavior require acceptance testing.
 
-## Delivery status
+## Linux delivery status
 
 The installer uses the distribution's signed Sunshine binary. Experimental host
 changes are source patches pinned to upstream commits; installing this package
@@ -73,7 +84,7 @@ mute and -60 to 0 dB gain, saved preferences, half-scale headroom per stream and
 audio timing. This adds no queued audio. The ARM client and native checks are part of the fork release. A package build
 and native tests do not establish TV audio quality or two-PC gameplay.
 
-## Remove the integration
+## Remove the Linux integration
 
 ```sh
 lg-tv-host-setup uninstall

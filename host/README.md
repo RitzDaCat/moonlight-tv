@@ -3,8 +3,8 @@
 This directory contains the Sunshine work used alongside the Moonlight TV client.
 It contains source patches and tools; it does not include a patched Sunshine binary.
 
-- [`installer/`](installer/README.md): CachyOS/Arch setup using the distribution's
-  signed Sunshine package, with controller permissions and optional audio/focus integration.
+- [`installer/`](installer/README.md): Windows setup using official Sunshine, plus
+  CachyOS/Arch integration with controller permissions and optional audio/focus setup.
 - [`patches/`](patches/): packet-size validation, NVENC presets and split-frame policy,
   FEC matrix reuse, optional video-stage profiling, DMA-BUF import caching,
   experimental KWin capture, CUDA-stream ordering, PipeWire buffer lifetime,

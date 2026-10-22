@@ -124,3 +124,4 @@ Test-Case 'loopback health probe observes a listener and releases its socket' {
 }
 
 Write-Host ('Windows helper tests passed: ' + $script:TestsPassed)
+exit 0
