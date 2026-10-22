@@ -1,0 +1,102 @@
+diff --git a/src/config.cpp b/src/config.cpp
+index 04341df..349386e 100644
+--- a/src/config.cpp
++++ b/src/config.cpp
+@@ -1619,7 +1619,7 @@ namespace config {
+     bool_f(vars, "nvenc_latency_over_power", video.nv_sunshine_high_power_mode);
+ 
+ #if !defined(__ANDROID__) && !defined(__APPLE__)
+-    video.nv_legacy.preset = video.nv.quality_preset + 11;
++    video.nv_legacy.preset = "p" + std::to_string(video.nv.quality_preset);
+     video.nv_legacy.multipass = video.nv.two_pass == nvenc::nvenc_two_pass::quarter_resolution ? NV_ENC_TWO_PASS_QUARTER_RESOLUTION :
+                                 video.nv.two_pass == nvenc::nvenc_two_pass::full_resolution    ? NV_ENC_TWO_PASS_FULL_RESOLUTION :
+                                                                                                  NV_ENC_MULTI_PASS_DISABLED;
+diff --git a/src/config.h b/src/config.h
+index 317c55d..f8ebc31 100644
+--- a/src/config.h
++++ b/src/config.h
+@@ -73,7 +73,7 @@ namespace config {
+     bool nv_sunshine_high_power_mode;  ///< Request NVIDIA high-power mode for Sunshine.
+ 
+     struct {
+-      int preset;  ///< Legacy NVENC preset selection.
++      std::string preset;  ///< FFmpeg NVENC preset name, independent of its numeric enum values.
+       int multipass;  ///< Legacy NVENC multipass mode.
+       int h264_coder;  ///< Legacy NVENC H.264 entropy-coding mode.
+       int aq;  ///< Legacy NVENC adaptive-quantization mode.
+diff --git a/tests/unit/test_nvenc_presets.cpp b/tests/unit/test_nvenc_presets.cpp
+new file mode 100644
+index 0000000..8c66718
+--- /dev/null
++++ b/tests/unit/test_nvenc_presets.cpp
+@@ -0,0 +1,70 @@
++#if !defined(__ANDROID__) && !defined(__APPLE__)
++
++  /**
++   * @file tests/unit/test_nvenc_presets.cpp
++   * @brief Verify configured NVENC presets resolve against the linked FFmpeg.
++   */
++  #include <gtest/gtest.h>
++  #include <src/config.h>
++
++extern "C" {
++  #include <libavcodec/avcodec.h>
++  #include <libavutil/opt.h>
++}
++
++/**
++ * @brief Isolate configuration changes while checking NVENC option names.
++ */
++class NvencPresetTest: public testing::Test {
++protected:
++  config::video_t original_video = config::video;  ///< Configuration restored after each test.
++  config::audio_t original_audio = config::audio;  ///< Audio configuration restored after each test.
++  config::stream_t original_stream = config::stream;  ///< Stream configuration restored after each test.
++  config::nvhttp_t original_nvhttp = config::nvhttp;  ///< HTTP configuration restored after each test.
++  config::input_t original_input = config::input;  ///< Input configuration restored after each test.
++  config::sunshine_t original_sunshine = config::sunshine;  ///< Core configuration restored after each test.
++  decltype(config::modified_config_settings) original_modified = config::modified_config_settings;  ///< Settings map restored after each test.
++
++  /**
++   * @brief Avoid apps-file creation and skip FFmpeg builds without NVENC.
++   */
++  void SetUp() override {
++    config::stream.file_apps = SUNSHINE_SOURCE_DIR "/tests/unit/test_nvenc_presets.cpp";
++    for (const auto name : {"h264_nvenc", "hevc_nvenc", "av1_nvenc"}) {
++      if (avcodec_find_encoder_by_name(name) == nullptr) {
++        GTEST_SKIP() << "Linked FFmpeg has no " << name;
++      }
++    }
++  }
++
++  /**
++   * @brief Restore the original video settings.
++   */
++  void TearDown() override {
++    config::video = original_video;
++    config::audio = original_audio;
++    config::stream = original_stream;
++    config::nvhttp = original_nvhttp;
++    config::input = original_input;
++    config::sunshine = original_sunshine;
++    config::modified_config_settings = original_modified;
++  }
++};
++
++TEST_F(NvencPresetTest, EveryQualityPresetResolvesForEveryNvencCodec) {
++  for (const auto name : {"h264_nvenc", "hevc_nvenc", "av1_nvenc"}) {
++    const AVCodec *codec = avcodec_find_encoder_by_name(name);
++    ASSERT_NE(codec, nullptr) << name;
++    AVCodecContext *context = avcodec_alloc_context3(codec);
++    ASSERT_NE(context, nullptr);
++    for (int quality = 1; quality <= 7; ++quality) {
++      config::apply_config_for_test("nvenc_preset = " + std::to_string(quality));
++      EXPECT_EQ(config::video.nv_legacy.preset, "p" + std::to_string(quality));
++      EXPECT_EQ(av_opt_set(context->priv_data, "preset", config::video.nv_legacy.preset.c_str(), 0), 0)
++        << name << ": " << config::video.nv_legacy.preset;
++    }
++    avcodec_free_context(&context);
++  }
++}
++
++#endif

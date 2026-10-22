@@ -1,0 +1,370 @@
+--- a/src/platform/linux/cuda.cpp
++++ b/src/platform/linux/cuda.cpp
+@@ -27,6 +27,7 @@
+ #include "src/video_latency_profile.h"
+ #include "dmabuf_import_cache.h"
+ #include <cstdlib>
++#include <dlfcn.h>
+ #include <string_view>
+ #include "wayland.h"
+ 
+@@ -130,6 +131,80 @@
+   using registered_resource_t = util::safe_ptr<CUgraphicsResource_st, unregisterResource>;
+ 
+   /**
++   * @brief Opt in to stream binding before avcodec_open2 snapshots the CUDA device.
++   * @return Whether the process explicitly enabled the experiment.
++   */
++  bool use_early_encoder_stream() {
++    const char *value = std::getenv("SUNSHINE_EARLY_CUDA_STREAM");
++    return value && std::string_view(value) == "1";
++  }
++
++  int activate_encoder_context(AVHWFramesContext *frames) {
++    if (!cdf || !frames || !frames->device_ctx || frames->device_ctx->type != AV_HWDEVICE_TYPE_CUDA || !frames->device_ctx->hwctx) {
++      return -1;
++    }
++    auto target = static_cast<AVCUDADeviceContext *>(frames->device_ctx->hwctx);
++    if (!target->cuda_ctx) {
++      return -1;
++    }
++    // FFmpeg's minimal CUDA loader omits this driver entry point.
++    using set_current_t = CUresult(CUDAAPI *)(CUcontext);
++    auto set_current = reinterpret_cast<set_current_t>(dlsym(cdf->lib, "cuCtxSetCurrent"));
++    if (!set_current) {
++      return -1;
++    }
++    CU_CHECK(set_current(target->cuda_ctx), "Couldn't activate encoder CUDA context");
++    return 0;
++  }
++
++  int bind_encoder_stream_before_open(AVHWFramesContext *frames, stream_t &stream, std::shared_ptr<AVBufferRef> &device_owner) {
++    if (!cdf || !frames || !frames->device_ref || !frames->device_ctx || frames->device_ctx->type != AV_HWDEVICE_TYPE_CUDA || !frames->device_ctx->hwctx) {
++      return -1;
++    }
++    auto target = static_cast<AVCUDADeviceContext *>(frames->device_ctx->hwctx);
++    if (!target->cuda_ctx) {
++      return -1;
++    }
++    AVCUDADeviceContext *previous = nullptr;
++    if (stream) {
++      if (!device_owner) {
++        return -1;
++      }
++      auto old_device = reinterpret_cast<AVHWDeviceContext *>(device_owner->data);
++      if (old_device->type != AV_HWDEVICE_TYPE_CUDA || !old_device->hwctx) {
++        return -1;
++      }
++      previous = static_cast<AVCUDADeviceContext *>(old_device->hwctx);
++      if (previous->cuda_ctx != target->cuda_ctx) {
++        return -1;
++      }
++    }
++    auto retained = av_buffer_ref(frames->device_ref);
++    if (!retained) {
++      return -1;
++    }
++    std::shared_ptr<AVBufferRef> next_owner(retained, [](AVBufferRef *ref) {
++      av_buffer_unref(&ref);
++    });
++    CU_CHECK(cdf->cuCtxPushCurrent(target->cuda_ctx), "Couldn't enter encoder CUDA context");
++    CUcontext popped = nullptr;
++    auto pop = util::fail_guard([&]() {
++      CU_CHECK_IGNORE(cdf->cuCtxPopCurrent(&popped), "Couldn't leave encoder CUDA context");
++    });
++    auto next_stream = make_stream(1 /* cudaStreamNonBlocking */);
++    if (!next_stream) {
++      return -1;
++    }
++    if (previous && previous->stream == stream.get()) {
++      previous->stream = nullptr;
++    }
++    stream = std::move(next_stream);
++    device_owner = std::move(next_owner);
++    target->stream = stream.get();
++    return 0;
++  }
++
++  /**
+    * @brief CUDA image wrapper that owns mapped graphics resources for one frame.
+    */
+   class img_t: public platf::img_t {
+@@ -160,6 +235,16 @@
+    */
+   class cuda_t: public platf::avcodec_encode_device_t {
+   public:
++    /**
++     * @brief Establish conversion ordering before FFmpeg copies its CUDA stream handle.
++     * @param codec Hardware encoder context being prepared for opening.
++     */
++    void init_codec_options(AVCodecContext *codec, AVDictionary **) override {
++      if (early_stream) {
++        early_stream_failed = !codec || !codec->hw_frames_ctx ||
++                              bind_encoder_stream_before_open(reinterpret_cast<AVHWFramesContext *>(codec->hw_frames_ctx->data), stream, stream_device) != 0;
++      }
++    }
+     /**
+      * @brief Initialize the CUDA device context used for frame conversion.
+      *
+@@ -210,12 +295,17 @@
+ 
+       auto cuda_ctx = (AVCUDADeviceContext *) hwframe_ctx->device_ctx->hwctx;
+ 
+-      stream = make_stream();
+-      if (!stream) {
+-        return -1;
+-      }
+-
+-      cuda_ctx->stream = stream.get();
++      if (early_stream) {
++        if (early_stream_failed || !stream || cuda_ctx->stream != stream.get() || activate_encoder_context(hwframe_ctx) != 0) {
++          return -1;
++        }
++      } else {
++        stream = make_stream();
++        if (!stream) {
++          return -1;
++        }
++        cuda_ctx->stream = stream.get();
++      }
+ 
+       auto sws_opt = sws_t::make(width, height, frame->width, frame->height, width * 4);
+       if (!sws_opt) {
+@@ -274,6 +364,9 @@
+       return linear_interpolation ? tex.texture.linear : tex.texture.point;
+     }
+ 
++    const bool early_stream = use_early_encoder_stream();  ///< Experimental explicit ordering selected at creation.
++    bool early_stream_failed = false;  ///< Reject a failed binding instead of silently changing ordering.
++    std::shared_ptr<AVBufferRef> stream_device;  ///< Keep the CUDA device alive until its stream is destroyed.
+     stream_t stream;  ///< CUDA stream used for asynchronous conversion work.
+     frame_t hwframe;  ///< FFmpeg hardware frame backed by CUDA resources.
+ 
+@@ -411,6 +504,16 @@
+    */
+   class gl_cuda_vram_t: public platf::avcodec_encode_device_t {
+   public:
++    /**
++     * @brief Establish conversion ordering before FFmpeg copies its CUDA stream handle.
++     * @param codec Hardware encoder context being prepared for opening.
++     */
++    void init_codec_options(AVCodecContext *codec, AVDictionary **) override {
++      if (early_stream) {
++        early_stream_failed = !codec || !codec->hw_frames_ctx ||
++                              bind_encoder_stream_before_open(reinterpret_cast<AVHWFramesContext *>(codec->hw_frames_ctx->data), stream, stream_device) != 0;
++      }
++    }
+     /** @brief Report opt-in CPU-wall measurements before conversion resources are released. */
+     ~gl_cuda_vram_t() override {
+       if (profile.enabled()) {
+@@ -516,12 +619,17 @@
+ 
+       auto cuda_ctx = (AVCUDADeviceContext *) hw_frames_ctx->device_ctx->hwctx;
+ 
+-      stream = make_stream();
+-      if (!stream) {
+-        return -1;
+-      }
+-
+-      cuda_ctx->stream = stream.get();
++      if (early_stream) {
++        if (early_stream_failed || !stream || cuda_ctx->stream != stream.get() || activate_encoder_context(hw_frames_ctx) != 0) {
++          return -1;
++        }
++      } else {
++        stream = make_stream();
++        if (!stream) {
++          return -1;
++        }
++        cuda_ctx->stream = stream.get();
++      }
+ 
+       if (is_yuv444) {
+         CU_CHECK(cdf->cuGraphicsGLRegisterImage(&cu_res.y_res, yuv444->tex[0], GL_TEXTURE_2D, CU_GRAPHICS_REGISTER_FLAGS_READ_ONLY), "Couldn't register Y texture");
+@@ -668,6 +776,9 @@
+     egl::ctx_t ctx;  ///< EGL context used to import captured frames.
+ 
+     // This must be destroyed before display_t
++    const bool early_stream = use_early_encoder_stream();  ///< Experimental explicit ordering selected at creation.
++    bool early_stream_failed = false;  ///< Reject a failed binding instead of silently changing ordering.
++    std::shared_ptr<AVBufferRef> stream_device;  ///< Keep the CUDA device alive until its stream is destroyed.
+     stream_t stream;  ///< CUDA stream used for asynchronous conversion work.
+     frame_t hwframe;  ///< FFmpeg hardware frame backed by CUDA resources.
+ 
+--- a/src/platform/linux/cuda.h
++++ b/src/platform/linux/cuda.h
+@@ -14,6 +14,9 @@
+ 
+   // local includes
+   #include "src/video_colorspace.h"
++
++struct AVBufferRef;
++struct AVHWFramesContext;
+ 
+ namespace platf {
+   struct avcodec_encode_device_t;
+@@ -66,7 +69,29 @@
+   using ptr_t = std::unique_ptr<void, freeCudaPtr_t>;
+   using stream_t = std::unique_ptr<CUstream_st, freeCudaStream_t>;
+ 
++  /**
++   * @brief Create an owned runtime CUDA stream in the current context.
++   * @param flags Runtime CUDA stream flags; zero preserves legacy blocking behavior.
++   * @return Owned stream, or an empty pointer on failure.
++   */
+   stream_t make_stream(int flags = 0);
++
++  /**
++   * @brief Make the session CUDA context current for subsequent conversion calls.
++   * @param frames Valid CUDA hardware frames belonging to the session.
++   * @return Zero on success; negative on invalid state or unavailable driver entry point.
++   * @note This intentionally keeps the context current, as late runtime stream creation did.
++   */
++  int activate_encoder_context(AVHWFramesContext *frames);
++
++  /**
++   * @brief Bind one nonblocking stream before FFmpeg opens its NVENC session.
++   * @param frames Hardware frames whose CUDA device is retained for stream lifetime.
++   * @param stream Owned conversion stream, replaced only within the same CUDA context.
++   * @param device_owner Retained device reference; must outlive stream.
++   * @return Zero on success; negative on invalid state or allocation failure.
++   */
++  int bind_encoder_stream_before_open(AVHWFramesContext *frames, stream_t &stream, std::shared_ptr<AVBufferRef> &device_owner);
+ 
+   struct viewport_t {
+     int width;
+--- /dev/null
++++ b/tests/unit/platform/linux/test_cuda_encoder_stream.cpp
+@@ -0,0 +1,132 @@
++// SPDX-License-Identifier: GPL-3.0-only
++/** @file test_cuda_encoder_stream.cpp
++ * @brief Real CUDA binding, rebinding, context validation and lifetime checks.
++ */
++#ifdef SUNSHINE_BUILD_CUDA
++  #include <dlfcn.h>
++  #include <ffnvcodec/dynlink_loader.h>
++  #include <gtest/gtest.h>
++extern "C" {
++  #include <libavutil/hwcontext_cuda.h>
++}
++  #include "src/platform/linux/cuda.h"
++  #include "src/video.h"
++
++/** @brief Reject incomplete bindings without needing a GPU or modifying ownership. */
++TEST(CudaEncoderStream, RejectsIncompleteFrames) {
++  std::shared_ptr<AVBufferRef> device_owner;
++  cuda::stream_t stream;
++  EXPECT_LT(cuda::bind_encoder_stream_before_open(nullptr, stream, device_owner), 0);
++  EXPECT_LT(cuda::activate_encoder_context(nullptr), 0);
++  AVHWFramesContext empty {};
++  EXPECT_LT(cuda::bind_encoder_stream_before_open(&empty, stream, device_owner), 0);
++  EXPECT_LT(cuda::activate_encoder_context(&empty), 0);
++  EXPECT_FALSE(stream);
++  EXPECT_FALSE(device_owner);
++}
++
++/** @brief Use real nonblocking work while preserving device and previous-state invariants. */
++TEST(CudaEncoderStream, BindingRebindingAndDeviceLifetime) {
++  CudaFunctions *functions = nullptr;
++  if (cuda_load_functions(&functions, nullptr) != 0) {
++    GTEST_SKIP() << "CUDA entry points unavailable";
++  }
++  auto release_functions = util::fail_guard([&]() {
++    cuda_free_functions(&functions);
++  });
++  if (cuda::init() != 0) {
++    GTEST_SKIP() << "CUDA driver unavailable";
++  }
++  video::avcodec_buffer_t device;
++  if (av_hwdevice_ctx_create(&device, AV_HWDEVICE_TYPE_CUDA, nullptr, nullptr, 1) < 0) {
++    GTEST_SKIP() << "CUDA primary context unavailable";
++  }
++  video::avcodec_buffer_t frames_ref {av_hwframe_ctx_alloc(device.get())};
++  ASSERT_TRUE(frames_ref);
++  auto frames = reinterpret_cast<AVHWFramesContext *>(frames_ref->data);
++  frames->format = AV_PIX_FMT_CUDA;
++  frames->sw_format = AV_PIX_FMT_NV12;
++  frames->width = frames->height = 64;
++  ASSERT_EQ(av_hwframe_ctx_init(frames_ref.get()), 0);
++  auto cuda_device = static_cast<AVCUDADeviceContext *>(frames->device_ctx->hwctx);
++  using set_current_t = CUresult(CUDAAPI *)(CUcontext);
++  auto set_current = reinterpret_cast<set_current_t>(dlsym(functions->lib, "cuCtxSetCurrent"));
++  ASSERT_NE(set_current, nullptr);
++  CUcontext previous = nullptr;
++  ASSERT_EQ(functions->cuCtxGetCurrent(&previous), CUDA_SUCCESS);
++  auto restore = util::fail_guard([&]() {
++    set_current(previous);
++  });
++  ASSERT_EQ(set_current(nullptr), CUDA_SUCCESS);
++  ASSERT_EQ(cuda::activate_encoder_context(frames), 0);
++  CUcontext active = nullptr;
++  ASSERT_EQ(functions->cuCtxGetCurrent(&active), CUDA_SUCCESS);
++  EXPECT_EQ(active, cuda_device->cuda_ctx);
++  std::shared_ptr<AVBufferRef> device_owner;
++  cuda::stream_t stream;
++  const int references = av_buffer_get_ref_count(frames->device_ref);
++  ASSERT_EQ(cuda::bind_encoder_stream_before_open(frames, stream, device_owner), 0);
++  ASSERT_TRUE(stream);
++  EXPECT_EQ(cuda_device->stream, stream.get());
++  EXPECT_EQ(av_buffer_get_ref_count(frames->device_ref), references + 1);
++  ASSERT_EQ(functions->cuCtxPushCurrent(cuda_device->cuda_ctx), CUDA_SUCCESS);
++  CUcontext popped = nullptr;
++  auto pop = util::fail_guard([&]() {
++    functions->cuCtxPopCurrent(&popped);
++  });
++  using stream_get_flags_t = CUresult (*)(CUstream, unsigned *);
++  auto stream_get_flags = reinterpret_cast<stream_get_flags_t>(dlsym(functions->lib, "cuStreamGetFlags"));
++  ASSERT_NE(stream_get_flags, nullptr);
++  unsigned flags = 0;
++  ASSERT_EQ(stream_get_flags(stream.get(), &flags), CUDA_SUCCESS);
++  EXPECT_EQ(flags & CU_STREAM_NON_BLOCKING, unsigned(CU_STREAM_NON_BLOCKING));
++
++  auto old_stream = stream.get();
++  ASSERT_EQ(cuda::bind_encoder_stream_before_open(frames, stream, device_owner), 0);
++  EXPECT_NE(old_stream, stream.get());
++  EXPECT_EQ(cuda_device->stream, stream.get());
++  EXPECT_EQ(av_buffer_get_ref_count(frames->device_ref), references + 1);
++
++  old_stream = stream.get();
++  AVHWDeviceContext wrong_device {};
++  wrong_device.type = AV_HWDEVICE_TYPE_VAAPI;
++  AVHWFramesContext wrong_frames = *frames;
++  wrong_frames.device_ctx = &wrong_device;
++  EXPECT_LT(cuda::bind_encoder_stream_before_open(&wrong_frames, stream, device_owner), 0);
++  EXPECT_LT(cuda::activate_encoder_context(&wrong_frames), 0);
++  AVCUDADeviceContext wrong_cuda {};
++  wrong_device.type = AV_HWDEVICE_TYPE_CUDA;
++  wrong_device.hwctx = &wrong_cuda;
++  EXPECT_LT(cuda::bind_encoder_stream_before_open(&wrong_frames, stream, device_owner), 0);
++  EXPECT_LT(cuda::activate_encoder_context(&wrong_frames), 0);
++  wrong_cuda.cuda_ctx = reinterpret_cast<CUcontext>(uintptr_t(1));
++  EXPECT_LT(cuda::bind_encoder_stream_before_open(&wrong_frames, stream, device_owner), 0);
++  EXPECT_EQ(old_stream, stream.get());
++  EXPECT_EQ(cuda_device->stream, stream.get());
++
++  // A failed caller ownership state must not replace a functioning stream.
++  auto saved_owner = std::move(device_owner);
++  EXPECT_LT(cuda::bind_encoder_stream_before_open(frames, stream, device_owner), 0);
++  EXPECT_EQ(old_stream, stream.get());
++  device_owner = std::move(saved_owner);
++  // Drop the original references: the binding retains the actual device.
++  frames_ref.reset();
++  device.reset();
++  CUdeviceptr gpu = 0;
++  ASSERT_EQ(functions->cuMemAlloc(&gpu, sizeof(unsigned)), CUDA_SUCCESS);
++  unsigned *host = nullptr;
++  if (functions->cuMemHostAlloc(reinterpret_cast<void **>(&host), sizeof(*host), 0) != CUDA_SUCCESS) {
++    functions->cuMemFree(gpu);
++    FAIL() << "Pinned allocation failed";
++  }
++  auto free_buffers = util::fail_guard([&]() {
++    functions->cuStreamSynchronize(stream.get());
++    functions->cuMemFreeHost(host);
++    functions->cuMemFree(gpu);
++  });
++  ASSERT_EQ(functions->cuMemsetD8Async(gpu, 0x2a, sizeof(unsigned), stream.get()), CUDA_SUCCESS);
++  ASSERT_EQ(functions->cuMemcpyDtoHAsync(host, gpu, sizeof(unsigned), stream.get()), CUDA_SUCCESS);
++  ASSERT_EQ(functions->cuStreamSynchronize(stream.get()), CUDA_SUCCESS);
++  EXPECT_EQ(*host, 0x2a2a2a2au);
++}
++#endif

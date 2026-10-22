@@ -1,0 +1,17 @@
+// SPDX-License-Identifier: GPL-3.0-only
+// Owned synthetic producer; this is not an imported game RGB conversion shader.
+#version 450
+layout(local_size_x=32,local_size_y=8) in;
+layout(r8ui,set=0,binding=0) uniform writeonly uimage2D output_frame;
+layout(push_constant) uniform Parameters {uint width;uint height;uint frame;} p;
+void main() {
+  uvec2 pixel=gl_GlobalInvocationID.xy;
+  if(pixel.x>=p.width || pixel.y>=p.height*3/2) return;
+  uint value=128;
+  if(pixel.y<p.height) {
+    value=16+((pixel.x/8+pixel.y/8)%220);
+    uint row=(p.frame*8)%(p.height-64);
+    if(pixel.y>=row && pixel.y<row+64) value=16+(p.frame*13)%220;
+  }
+  imageStore(output_frame,ivec2(pixel),uvec4(value,0,0,0));
+}

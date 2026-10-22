@@ -1,0 +1,66 @@
+# Experimental isolated policies for PyroEnc05b1dfd; upstream code remains MIT.
+--- a/pyroenc.cpp
++++ b/pyroenc.cpp
+@@ -1362,6 +1362,15 @@
+ 		num_slices = params.intra_refresh_period;
+ 		segments_per_slice = params.intra_refresh_slice_stride;
+ 	}
++#ifdef SUNSHINE_PYROENC_TILES2
++    if (params.h265.pps.flags.tiles_enabled_flag) {
++        const uint32_t ctb_size = 1u << (find_msb(caps.h265.caps.ctbSizes) + 4);
++        const uint32_t columns = (params.h265.sps.pic_width_in_luma_samples + ctb_size - 1) / ctb_size;
++        const uint32_t rows = (params.h265.sps.pic_height_in_luma_samples + ctb_size - 1) / ctb_size;
++        num_slices = 2;
++        segments_per_slice = columns * (rows / 2);
++    }
++#endif
+ 
+ 	for (uint32_t i = 0; i < num_slices; i++)
+ 	{
+@@ -1373,8 +1382,15 @@
+ 		slice.pStdSliceSegmentHeader = &slice_header;
+ 		slice_header.slice_type = is_idr ? STD_VIDEO_H265_SLICE_TYPE_I : STD_VIDEO_H265_SLICE_TYPE_P;
+ 		slice_header.MaxNumMergeCand = 5;
++#ifdef SUNSHINE_PYROENC_MERGE1
++        slice_header.MaxNumMergeCand = 1;
++#endif
+ 		slice_header.flags.first_slice_segment_in_pic_flag = i == 0;
++#ifdef SUNSHINE_PYROENC_TILES2
++        slice_header.slice_segment_address = i * segments_per_slice;
++#else
+ 		slice_header.slice_segment_address = num_slices * segments_per_slice;
++#endif
+ 
+ 		if (tuning != VK_VIDEO_ENCODE_TUNING_MODE_LOW_LATENCY_KHR &&
+ 			tuning != VK_VIDEO_ENCODE_TUNING_MODE_ULTRA_LOW_LATENCY_KHR)
+@@ -2701,6 +2717,14 @@
+ 	uint32_t max_transform_hierarchy = (find_msb(caps.ctbSizes) + 4) - (find_lsb(caps.transformBlockSizes) + 2);
+ 	sps.max_transform_hierarchy_depth_inter = max_transform_hierarchy;
+ 	sps.max_transform_hierarchy_depth_intra = max_transform_hierarchy;
++#ifdef SUNSHINE_PYROENC_TU16
++    if ((caps.transformBlockSizes & VK_VIDEO_ENCODE_H265_TRANSFORM_BLOCK_SIZE_16_BIT_KHR) == 0)
++        return false;
++    sps.log2_min_luma_transform_block_size_minus2 = 2;
++    sps.log2_diff_max_min_luma_transform_block_size = 1;
++    sps.max_transform_hierarchy_depth_inter = 0;
++    sps.max_transform_hierarchy_depth_intra = 0;
++#endif
+ 
+ 	StdVideoH265DecPicBufMgr dec_pic_buf_mgr = {};
+ 	dec_pic_buf_mgr.max_dec_pic_buffering_minus1[0] = MaxActiveReferencePictures;
+@@ -2729,6 +2753,15 @@
+ 
+ 	// This is required or NV output gets really broken.
+ 	pps.flags.cu_qp_delta_enabled_flag = 1;
++#ifdef SUNSHINE_PYROENC_TILES2
++    if (caps.maxTiles.height < 2 || caps.maxSliceSegmentCount < 2)
++        return false;
++    pps.flags.tiles_enabled_flag = 1;
++    pps.flags.uniform_spacing_flag = 1;
++    pps.flags.loop_filter_across_tiles_enabled_flag = 0;
++    pps.num_tile_columns_minus1 = 0;
++    pps.num_tile_rows_minus1 = 1;
++#endif
+ 
+ 	// These seems to be required for some reason.
+ 	vps.flags.vps_temporal_id_nesting_flag = 1;

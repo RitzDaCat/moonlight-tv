@@ -1,0 +1,675 @@
+--- a/src/platform/linux/cuda.cpp
++++ b/src/platform/linux/cuda.cpp
+@@ -20,16 +20,17 @@
+ 
+ // local includes
+ #include "cuda.h"
++#include "dmabuf_import_cache.h"
+ #include "graphics.h"
+ #include "src/logging.h"
+ #include "src/utility.h"
+ #include "src/video.h"
+ #include "src/video_latency_profile.h"
+-#include "dmabuf_import_cache.h"
++#include "wayland.h"
++
+ #include <cstdlib>
+ #include <dlfcn.h>
+ #include <string_view>
+-#include "wayland.h"
+ 
+ /**
+  * @def SUNSHINE_STRINGVIEW_HELPER(x)
+@@ -245,6 +246,7 @@
+                               bind_encoder_stream_before_open(reinterpret_cast<AVHWFramesContext *>(codec->hw_frames_ctx->data), stream, stream_device) != 0;
+       }
+     }
++
+     /**
+      * @brief Initialize the CUDA device context used for frame conversion.
+      *
+@@ -299,6 +301,7 @@
+         if (early_stream_failed || !stream || cuda_ctx->stream != stream.get() || activate_encoder_context(hwframe_ctx) != 0) {
+           return -1;
+         }
++        BOOST_LOG(info) << "CUDA conversion uses the encoder pre-open stream";
+       } else {
+         stream = make_stream();
+         if (!stream) {
+@@ -514,8 +517,17 @@
+                               bind_encoder_stream_before_open(reinterpret_cast<AVHWFramesContext *>(codec->hw_frames_ctx->data), stream, stream_device) != 0;
+       }
+     }
++
+     /** @brief Report opt-in CPU-wall measurements before conversion resources are released. */
+     ~gl_cuda_vram_t() override {
++      // Conversion may have failed before the synchronous NVENC packet wait.
++      if (pending_source_read && stream) {
++        auto frames = hwframe && hwframe->hw_frames_ctx ? reinterpret_cast<AVHWFramesContext *>(hwframe->hw_frames_ctx->data) : nullptr;
++        if (activate_encoder_context(frames) == 0) {
++          CU_CHECK_IGNORE(cdf->cuStreamSynchronize(stream.get()), "Couldn't finish outstanding source reads");
++        }
++        pending_source_read.reset();
++      }
+       if (profile.enabled()) {
+         BOOST_LOG(info) << profile.report("linux-egl-cuda");
+       }
+@@ -623,6 +635,7 @@
+         if (early_stream_failed || !stream || cuda_ctx->stream != stream.get() || activate_encoder_context(hw_frames_ctx) != 0) {
+           return -1;
+         }
++        BOOST_LOG(info) << "CUDA conversion uses the encoder pre-open stream";
+       } else {
+         stream = make_stream();
+         if (!stream) {
+@@ -649,6 +662,13 @@
+      */
+     int convert(platf::img_t &img) override {
+       auto &descriptor = (egl::img_descriptor_t &) img;
++      // Packet completion normally already waited for this stream. On failure or
++      // early return, still finish the GPU read before returning a producer buffer.
++      if (pending_source_read) {
++        CU_CHECK(cdf->cuStreamSynchronize(stream.get()), "Couldn't retire previous source reads");
++        pending_source_read.reset();
++      }
++      pending_source_read = descriptor.capture_buffer;
+ 
+       const egl::rgb_t *source_rgb = nullptr;
+       {
+@@ -663,7 +683,9 @@
+             sequence = descriptor.sequence;
+             rgb = egl::rgb_t {};
+             auto imported = egl::import_source(display.get(), descriptor.sd);
+-            if (!imported) return -1;
++            if (!imported) {
++              return -1;
++            }
+             rgb = std::move(*imported);
+           }
+           source_rgb = &rgb;
+@@ -682,10 +704,14 @@
+           }
+           source_rgb = source_imports.get(source, [&](const dma_import::surface &pinned) {
+             auto retained = descriptor.sd;
+-            for (std::size_t p = 0; p < 4; ++p) retained.fds[p] = pinned.fds[p];
++            for (std::size_t p = 0; p < 4; ++p) {
++              retained.fds[p] = pinned.fds[p];
++            }
+             return egl::import_source(display.get(), retained);
+           });
+-          if (!source_rgb) return -1;
++          if (!source_rgb) {
++            return -1;
++          }
+         }
+       }
+ 
+@@ -781,6 +807,7 @@
+     std::shared_ptr<AVBufferRef> stream_device;  ///< Keep the CUDA device alive until its stream is destroyed.
+     stream_t stream;  ///< CUDA stream used for asynchronous conversion work.
+     frame_t hwframe;  ///< FFmpeg hardware frame backed by CUDA resources.
++    std::shared_ptr<void> pending_source_read;  ///< Retain producer ownership until the conversion stream completes.
+ 
+     egl::sws_t sws;  ///< Software scaler used for CUDA frame conversion fallback paths.
+     egl::nv12_t nv12;  ///< EGL/OpenGL resources used for NV12 output frames.
+--- a/src/platform/linux/graphics.h
++++ b/src/platform/linux/graphics.h
+@@ -6,6 +6,7 @@
+ 
+ // standard includes
+ #include <optional>
++#include <memory>
+ #include <string_view>
+ 
+ // lib includes
+@@ -610,6 +611,7 @@
+      * @brief Reset the object to its initial empty state.
+      */
+     void reset() {
++      capture_buffer.reset();
+       for (auto x = 0; x < 4; ++x) {
+         if (sd.fds[x] >= 0) {
+           close(sd.fds[x]);
+@@ -619,6 +621,7 @@
+       }
+     }
+ 
++    std::shared_ptr<void> capture_buffer;  ///< Optional producer read ownership; GPU consumers retain until reads complete.
+     surface_descriptor_t sd;  ///< DMA-BUF surface descriptor for the captured image.
+ 
+     // Increment sequence when new rgb_t needs to be created
+--- a/src/platform/linux/pipewire.cpp
++++ b/src/platform/linux/pipewire.cpp
+@@ -3,7 +3,9 @@
+  * @brief Shared classes for pipewire-based capture methods.
+  */
+ // standard includes
++#include <cstdlib>
+ #include <fstream>
++#include <string_view>
+ 
+ // lib includes
+ #include <gio/gio.h>
+@@ -17,6 +19,7 @@
+ // local includes
+ #include "cuda.h"
+ #include "graphics.h"
++#include "pipewire_buffer_lease.h"
+ #include "src/main.h"
+ #include "src/platform/common.h"
+ #include "src/video.h"
+@@ -87,14 +90,62 @@
+     std::string err_msg;  ///< Last PipeWire error message reported by the stream.
+   };
+ 
++  /** @brief Serialize lease return against destruction of the owning PipeWire thread loop. */
++  struct buffer_lease_state {
++    std::mutex lifetime;  ///< Always acquired before the PipeWire loop by external consumers.
++    pw_thread_loop *loop = nullptr;  ///< Live loop, detached under lifetime and loop locks at teardown.
++    pw_stream *stream = nullptr;  ///< Live stream, accessed with its thread-loop lock held.
++    pipewire_lease::pool buffers;  ///< Latest buffer and active read registrations.
++
++    /**
++     * @brief Return a token from a capture or encoder thread, never from a PipeWire callback.
++     * @param token Registration whose last external consumer completed.
++     */
++    void release(const pipewire_lease::ticket &token) {
++      std::scoped_lock lock(lifetime);
++      if (!loop) {
++        return;
++      }
++      pw_thread_loop_lock(loop);
++      if (void *retired = buffers.release(token); retired && stream) {
++        pw_stream_queue_buffer(stream, static_cast<pw_buffer *>(retired));
++      }
++      pw_thread_loop_unlock(loop);
++    }
++  };
++
++  /** @brief One read token owned only by capture/encoder image references, not PipeWire callbacks. */
++  struct buffer_read_token {
++    std::shared_ptr<buffer_lease_state> owner;  ///< Keeps the detached lifetime gate valid after stream destruction.
++    pipewire_lease::ticket token;  ///< Exactly one release for this registration.
++
++    /**
++     * @brief Retain one already-pinned read registration.
++     * @param owner Live or detached PipeWire ownership state.
++     * @param token Newly acquired, uniquely released read registration.
++     */
++    buffer_read_token(std::shared_ptr<buffer_lease_state> owner, pipewire_lease::ticket token):
++        owner(std::move(owner)),
++        token(token) {}
++
++    /** @brief Release only after the last image and GPU-read owner finish. */
++    ~buffer_read_token() {
++      owner->release(token);
++    }
++
++    buffer_read_token(const buffer_read_token &) = delete;
++    buffer_read_token &operator=(const buffer_read_token &) = delete;
++  };
++
+   /**
+    * @brief PipeWire stream handle, format, and shared state pointer.
+    */
+   struct stream_data_t {
+-    struct pw_stream *stream;  ///< PipeWire stream handle used for screencast frames.
++    struct pw_stream *stream = nullptr;  ///< PipeWire stream handle used for screencast frames.
+     struct spa_hook stream_listener;  ///< Hook registering callbacks on the PipeWire stream.
+     struct spa_video_info format;  ///< Negotiated PipeWire video format.
+-    struct pw_buffer *current_buffer;  ///< PipeWire buffer currently exposed to the capture thread.
++    std::shared_ptr<buffer_lease_state> leases;  ///< Optional CUDA read ownership, only mutated under the PipeWire loop.
++    struct pw_buffer *current_buffer = nullptr;  ///< PipeWire buffer currently exposed to the capture thread.
+     uint64_t drm_format;  ///< DRM format.
+     std::shared_ptr<shared_state_t> shared;  ///< State shared between PipeWire callbacks and the capture backend.
+     std::mutex frame_mutex;  ///< Synchronizes access to the current PipeWire frame.
+@@ -150,11 +201,18 @@
+         loop(pw_thread_loop_new("Pipewire thread", nullptr)) {
+       BOOST_LOG(debug) << "[pipewire] Start PW thread loop"sv;
+       pw_thread_loop_start(loop);
++      leases->loop = loop;
+     }
+ 
+     ~pipewire_t() {
+       BOOST_LOG(debug) << "[pipewire] Destroying pipewire_t"sv;
++      // Last token returns take lifetime -> loop. Callbacks never own tokens.
++      std::unique_lock lifetime(leases->lifetime);
+       pw_thread_loop_lock(loop);
++      leases->loop = nullptr;
++      leases->stream = nullptr;
++      leases->buffers.clear();
++      lifetime.unlock();
+ 
+       // Lock the frame mutex to stop fill_img
+       BOOST_LOG(debug) << "[pipewire] Stop fill_img"sv;
+@@ -327,6 +385,12 @@
+ 
+         BOOST_LOG(debug) << "[pipewire] Create PW stream"sv;
+         stream_data.stream = pw_stream_new(core, "Sunshine Video Capture", props);
++        const char *lease_option = std::getenv("SUNSHINE_LEASE_PIPEWIRE_BUFFERS");
++        if (mem_type == platf::mem_type_e::cuda && lease_option && std::string_view(lease_option) == "1") {
++          stream_data.leases = leases;
++          leases->stream = stream_data.stream;
++          BOOST_LOG(info) << "[pipewire] Explicit CUDA source-buffer read ownership enabled";
++        }
+         pw_stream_add_listener(stream_data.stream, &stream_data.stream_listener, &stream_events, &stream_data);
+ 
+         std::array<uint8_t, SPA_POD_BUFFER_SIZE> buffer;
+@@ -468,6 +532,20 @@
+         fill_img_metadata(img_descriptor, buf);
+         if (buf->datas[0].type == SPA_DATA_DmaBuf) {
+           fill_img_dmabuf(img_descriptor, buf, stream_data);
++          if (stream_data.leases) {
++            auto token = stream_data.leases->buffers.pin_current();
++            if (!token) {
++              close_img_fds(img_descriptor);
++              img->data = nullptr;
++            } else {
++              // Roll back the pin if allocation fails before the shared token owns it.
++              auto rollback = util::fail_guard([&]() {
++                stream_data.leases->buffers.release(*token);
++              });
++              img_descriptor->capture_buffer = std::make_shared<buffer_read_token>(stream_data.leases, *token);
++              rollback.disable();
++            }
++          }
+         } else {
+           img->data = stream_data.front_buffer->data();
+           img_descriptor->data_owned = false;
+@@ -491,6 +569,7 @@
+     }
+ 
+   private:
++    std::shared_ptr<buffer_lease_state> leases = std::make_shared<buffer_lease_state>();  ///< Session lifetime gate, not owned by any PipeWire callback token.
+     struct pw_thread_loop *loop;
+     struct pw_context *context;
+     struct pw_core *core;
+@@ -581,6 +660,11 @@
+             {
+               std::scoped_lock lock(d->frame_mutex);
+               d->frame_ready = false;
++              if (d->leases) {
++                if (void *retired = d->leases->buffers.retire_current()) {
++                  pw_stream_queue_buffer(d->stream, static_cast<pw_buffer *>(retired));
++                }
++              }
+               d->current_buffer = nullptr;
+               d->shared->stream_dead.store(true);
+               d->shared->current_state = state;
+@@ -628,7 +712,19 @@
+       // 2. Fast Path: DMA-BUF
+       if (b->buffer->datas[0].type == SPA_DATA_DmaBuf) {
+         std::scoped_lock lock(d->frame_mutex);
+-        if (d->current_buffer) {
++        if (d->leases) {
++          auto delivery = d->leases->buffers.accept(b);
++          if (!delivery.accepted) {
++            BOOST_LOG(error) << "[pipewire] Invalid or exhausted source-buffer ownership ledger";
++            if (!d->leases->buffers.contains(b)) {
++              pw_stream_queue_buffer(d->stream, b);
++            }
++            return;
++          }
++          if (delivery.retired) {
++            pw_stream_queue_buffer(d->stream, static_cast<pw_buffer *>(delivery.retired));
++          }
++        } else if (d->current_buffer) {
+           pw_stream_queue_buffer(d->stream, d->current_buffer);
+         }
+         d->current_buffer = b;
+@@ -664,6 +760,11 @@
+     static void on_param_changed(void *user_data, uint32_t id, const struct spa_pod *param) {
+       const auto d = static_cast<struct stream_data_t *>(user_data);
+ 
++      if (d->leases) {
++        if (void *retired = d->leases->buffers.retire_current()) {
++          pw_stream_queue_buffer(d->stream, static_cast<pw_buffer *>(retired));
++        }
++      }
+       d->current_buffer = nullptr;
+ 
+       if (param == nullptr || id != SPA_PARAM_Format) {
+@@ -747,10 +848,29 @@
+       pw_stream_update_params(d->stream, params.data(), n_params);
+     }
+ 
++    /**
++     * @brief Invalidate producer-removed buffer addresses before outstanding token returns.
++     * @param user_data PipeWire stream state protected by its thread-loop lock.
++     * @param buffer Producer buffer about to be removed.
++     */
++    static void on_remove_buffer(void *user_data, pw_buffer *buffer) {
++      auto *data = static_cast<stream_data_t *>(user_data);
++      if (!data->leases) {
++        return;
++      }
++      data->leases->buffers.remove(buffer);
++      std::scoped_lock lock(data->frame_mutex);
++      if (data->current_buffer == buffer) {
++        data->current_buffer = nullptr;
++        data->frame_ready = false;
++      }
++    }
++
+     constexpr static const struct pw_stream_events stream_events = {
+       .version = PW_VERSION_STREAM_EVENTS,
+       .state_changed = on_stream_state_changed,
+       .param_changed = on_param_changed,
++      .remove_buffer = on_remove_buffer,
+       .process = on_process,
+     };
+   };
+@@ -962,6 +1082,13 @@
+         if ((img_egl->sd.fds[0] >= 0 || img_egl->data != nullptr) && !is_buffer_redundant(img_egl)) {
+           // Update frame metadata
+           update_metadata(img_egl, retries);
++          if (img_egl->capture_buffer) {
++            auto pooled = std::move(img_out);
++            auto *pointer = pooled.get();
++            img_out = std::shared_ptr<platf::img_t>(pointer, [pooled = std::move(pooled)](platf::img_t *image) {
++              static_cast<egl::img_descriptor_t *>(image)->capture_buffer.reset();
++            });
++          }
+           return platf::capture_e::ok;
+         }
+ 
+--- /dev/null
++++ b/src/platform/linux/pipewire_buffer_lease.h
+@@ -0,0 +1,167 @@
++/**
++ * @file src/platform/linux/pipewire_buffer_lease.h
++ * @brief Bounded PipeWire buffer ownership, protected by the caller's thread-loop lock.
++ */
++#pragma once
++#include <array>
++#include <cstdint>
++#include <limits>
++#include <optional>
++
++namespace pipewire_lease {
++  /** @brief A generation-checked read ownership token; it never dereferences its buffer. */
++  struct ticket {
++    void *buffer = nullptr;  ///< Opaque buffer identity.
++    std::uint64_t generation = 0;  ///< Monotonic registration identity.
++    unsigned slot = 0;  ///< Fixed pool slot for constant-time release.
++  };
++
++  /** @brief A fixed-capacity ownership ledger with no allocation on buffer delivery. */
++  class pool {
++  public:
++    static constexpr unsigned capacity = 32;  ///< Hard limit above the negotiated producer buffer count.
++
++    /** @brief Result of accepting a delivered producer buffer. */
++    struct delivery {
++      bool accepted = false;  ///< Whether the new current buffer was installed.
++      void *retired = nullptr;  ///< Previous unused buffer the caller can return to the producer.
++    };
++
++    /**
++     * @brief Install a new latest buffer while preserving all active readers.
++     * @param buffer Newly dequeued, uniquely owned producer buffer.
++     * @return Acceptance status and an unused previous buffer eligible for return.
++     */
++    delivery accept(void *buffer) {
++      if (!buffer || next_generation == std::numeric_limits<std::uint64_t>::max()) {
++        return {};
++      }
++      unsigned free = capacity;
++      for (unsigned i = 0; i < capacity; ++i) {
++        if (entries[i].buffer == buffer) {
++          return {};
++        }
++        if (!entries[i].buffer && free == capacity) {
++          free = i;
++        }
++      }
++      if (free == capacity && current < capacity && entries[current].readers == 0) {
++        free = current;
++      }
++      if (free == capacity) {
++        return {};
++      }
++      void *retired = retire_current();
++      entries[free] = {buffer, ++next_generation, 0};
++      current = free;
++      return {true, retired};
++    }
++
++    /**
++     * @brief Pin the latest buffer until its consumer finishes reading.
++     * @return A token for this registration, or empty when there is no current buffer.
++     */
++    std::optional<ticket> pin_current() {
++      if (current == capacity || entries[current].readers == std::numeric_limits<unsigned>::max()) {
++        return std::nullopt;
++      }
++      auto &entry = entries[current];
++      ++entry.readers;
++      return ticket {entry.buffer, entry.generation, current};
++    }
++
++    /**
++     * @brief Release one read token without touching removed or re-registered buffers.
++     * @param token Token acquired exactly once by the consumer.
++     * @return A no-longer-current buffer eligible for producer reuse, or null.
++     */
++    void *release(const ticket &token) {
++      if (token.slot >= capacity) {
++        return nullptr;
++      }
++      auto &entry = entries[token.slot];
++      if (entry.buffer != token.buffer || entry.generation != token.generation || entry.readers == 0) {
++        return nullptr;
++      }
++      if (--entry.readers == 0 && current != token.slot) {
++        void *buffer = entry.buffer;
++        entry = {};
++        return buffer;
++      }
++      return nullptr;
++    }
++
++    /**
++     * @brief Stop advertising the latest buffer while preserving outstanding readers.
++     * @return An unused current buffer eligible for producer return, or null.
++     */
++    void *retire_current() {
++      if (current == capacity) {
++        return nullptr;
++      }
++      auto &entry = entries[current];
++      current = capacity;
++      if (entry.readers != 0) {
++        return nullptr;
++      }
++      void *buffer = entry.buffer;
++      entry = {};
++      return buffer;
++    }
++
++    /**
++     * @brief Invalidate a removed producer buffer before its address can be reused.
++     * @param buffer Removed opaque producer buffer.
++     */
++    void remove(void *buffer) {
++      for (unsigned i = 0; i < capacity; ++i) {
++        if (entries[i].buffer == buffer) {
++          entries[i] = {};
++          if (current == i) {
++            current = capacity;
++          }
++        }
++      }
++    }
++
++    /** @brief Detach all registrations at stream destruction, retaining the generation counter. */
++    void clear() {
++      entries = {};
++      current = capacity;
++    }
++
++    /**
++     * @brief Check whether a delivered pointer is still held by this ledger.
++     * @param buffer Producer buffer identity, never dereferenced.
++     * @return Whether a live registration owns the buffer.
++     */
++    bool contains(void *buffer) const {
++      for (const auto &entry : entries) {
++        if (entry.buffer && entry.buffer == buffer) {
++          return true;
++        }
++      }
++      return false;
++    }
++
++    /**
++     * @brief Inspect the latest dequeued buffer without acquiring read ownership.
++     * @return Current opaque buffer identity, or null.
++     */
++    void *latest() const {
++      return current < capacity ? entries[current].buffer : nullptr;
++    }
++
++  private:
++    /** @brief One producer registration and its active reader count. */
++    struct entry {
++      void *buffer = nullptr;  ///< Producer buffer identity.
++      std::uint64_t generation = 0;  ///< Never reused within this stream owner.
++      unsigned readers = 0;  ///< Number of outstanding read tokens.
++    };
++
++    std::array<entry, capacity> entries {};  ///< Bounded registrations, including retired readers.
++    unsigned current = capacity;  ///< Current slot or the invalid sentinel.
++    std::uint64_t next_generation = 0;  ///< New registration counter, preserved across clearing.
++  };
++}  // namespace pipewire_lease
+--- /dev/null
++++ b/tests/unit/platform/linux/test_pipewire_buffer_lease.cpp
+@@ -0,0 +1,127 @@
++/**
++ * @file tests/unit/platform/linux/test_pipewire_buffer_lease.cpp
++ * @brief Ownership, pointer reuse, bounded capacity and pause/removal transitions.
++ */
++#include "src/platform/linux/pipewire_buffer_lease.h"
++
++#include <gtest/gtest.h>
++
++/** @brief Hold an old buffer until its last reader returns, while latest-only delivery advances. */
++TEST(PipewireBufferLease, PreventsReuseWhileAnyReaderRemains) {
++  pipewire_lease::pool pool;
++  int first, second, third;
++  EXPECT_FALSE(pool.pin_current());
++  EXPECT_EQ(pool.retire_current(), nullptr);
++  EXPECT_FALSE(pool.accept(nullptr).accepted);
++  ASSERT_TRUE(pool.accept(&first).accepted);
++  auto a = pool.pin_current(), b = pool.pin_current();
++  ASSERT_TRUE(a);
++  ASSERT_TRUE(b);
++  auto delivered = pool.accept(&second);
++  EXPECT_TRUE(delivered.accepted);
++  EXPECT_EQ(delivered.retired, nullptr);
++  EXPECT_EQ(pool.release(*a), nullptr);
++  EXPECT_EQ(pool.latest(), &second);
++  delivered = pool.accept(&third);
++  EXPECT_TRUE(delivered.accepted);
++  EXPECT_EQ(delivered.retired, &second);
++  EXPECT_EQ(pool.release(*b), &first);
++  EXPECT_EQ(pool.release(*b), nullptr);
++  EXPECT_EQ(pool.retire_current(), &third);
++  EXPECT_EQ(pool.latest(), nullptr);
++}
++
++/** @brief Reject duplicate deliveries and stale tokens after address reuse, removal or teardown. */
++TEST(PipewireBufferLease, RejectsStaleRegistrationsWithoutDoubleQueueing) {
++  pipewire_lease::pool pool;
++  int buffer;
++  ASSERT_TRUE(pool.accept(&buffer).accepted);
++  auto old = pool.pin_current();
++  ASSERT_TRUE(old);
++  EXPECT_FALSE(pool.accept(&buffer).accepted);
++  EXPECT_TRUE(pool.contains(&buffer));
++  EXPECT_FALSE(pool.contains(nullptr));
++  pool.remove(&buffer);
++  EXPECT_EQ(pool.latest(), nullptr);
++  EXPECT_FALSE(pool.contains(&buffer));
++  ASSERT_TRUE(pool.accept(&buffer).accepted);
++  auto current = pool.pin_current();
++  ASSERT_TRUE(current);
++  EXPECT_NE(old->generation, current->generation);
++  EXPECT_EQ(pool.release(*old), nullptr);
++  EXPECT_EQ(pool.retire_current(), nullptr);
++  EXPECT_EQ(pool.release(*current), &buffer);
++  ASSERT_TRUE(pool.accept(&buffer).accepted);
++  current = pool.pin_current();
++  ASSERT_TRUE(current);
++  pool.clear();
++  ASSERT_TRUE(pool.accept(&buffer).accepted);
++  EXPECT_EQ(pool.release(*current), nullptr);
++  EXPECT_EQ(pool.latest(), &buffer);
++  auto invalid = *old;
++  invalid.slot = pipewire_lease::pool::capacity;
++  EXPECT_EQ(pool.release(invalid), nullptr);
++  pool.remove(nullptr);
++  EXPECT_EQ(pool.retire_current(), &buffer);
++}
++
++/** @brief Pause preserves active ownership and avoids starving the next producer buffer. */
++TEST(PipewireBufferLease, RetiresPausedReadersAndReusesUnpinnedSlots) {
++  pipewire_lease::pool pool;
++  std::array<int, pipewire_lease::pool::capacity + 1> buffers {};
++  std::array<pipewire_lease::ticket, pipewire_lease::pool::capacity> tickets {};
++  for (unsigned i = 0; i < pool.capacity; ++i) {
++    ASSERT_TRUE(pool.accept(&buffers[i]).accepted);
++    tickets[i] = *pool.pin_current();
++  }
++  EXPECT_FALSE(pool.accept(&buffers.back()).accepted);
++  EXPECT_EQ(pool.latest(), &buffers[pool.capacity - 1]);
++  EXPECT_EQ(pool.retire_current(), nullptr);
++  EXPECT_EQ(pool.release(tickets[0]), &buffers[0]);
++  ASSERT_TRUE(pool.accept(&buffers.back()).accepted);
++  for (unsigned i = 1; i < pool.capacity; ++i) {
++    EXPECT_EQ(pool.release(tickets[i]), &buffers[i]);
++  }
++  EXPECT_EQ(pool.retire_current(), &buffers.back());
++  // A full ledger can reuse its current unpinned slot atomically.
++  for (unsigned i = 0; i < pool.capacity; ++i) {
++    ASSERT_TRUE(pool.accept(&buffers[i]).accepted);
++    if (i + 1 < pool.capacity) {
++      tickets[i] = *pool.pin_current();
++    }
++  }
++  auto replacement = pool.accept(&buffers.back());
++  EXPECT_TRUE(replacement.accepted);
++  EXPECT_EQ(replacement.retired, &buffers[pool.capacity - 1]);
++}
++
++/** @brief Repeated three-buffer cycles never let a producer overwrite a held frame. */
++TEST(PipewireBufferLease, SustainsProducerConsumerReuseAndGenerations) {
++  pipewire_lease::pool pool;
++  std::array<int, 3> pixels {};
++  std::array<bool, 3> producer_owned {true, true, true};
++  auto returned = [&](void *p) {
++    if (p) {
++      const auto index = static_cast<int *>(p) - pixels.data();
++      ASSERT_FALSE(producer_owned[index]);
++      producer_owned[index] = true;
++    }
++  };
++  for (int frame = 0; frame < 10000; ++frame) {
++    const unsigned index = frame % pixels.size();
++    ASSERT_TRUE(producer_owned[index]);
++    pixels[index] = frame;
++    producer_owned[index] = false;
++    auto next = pool.accept(&pixels[index]);
++    ASSERT_TRUE(next.accepted);
++    returned(next.retired);
++    auto read = pool.pin_current();
++    ASSERT_TRUE(read);
++    EXPECT_EQ(*static_cast<int *>(read->buffer), frame);
++    returned(pool.release(*read));
++  }
++  returned(pool.retire_current());
++  for (bool owned : producer_owned) {
++    EXPECT_TRUE(owned);
++  }
++}

@@ -1,0 +1,30 @@
+diff --git a/src/platform/linux/kwingrab.cpp b/src/platform/linux/kwingrab.cpp
+index 93431871..409bcf51 100644
+--- a/src/platform/linux/kwingrab.cpp
++++ b/src/platform/linux/kwingrab.cpp
+@@ -388,6 +388,8 @@ namespace kwin {
+ 
+     /**
+      * @brief Request a screencast stream.
++     * An explicit SUNSHINE_KWIN_WINDOW_UUID selects the experimental fullscreen
++     * window source. With no override, capture the selected output as before.
+      * @param output_name Which wl_output to capture.
+      * @return 0 on success, -1 on failure. On success, node_id and
+      *         output width/height/x/y are populated.
+@@ -416,7 +418,15 @@ namespace kwin {
+ 
+       // Request a stream for the chosen output with embedded cursor
+       if (kde_screencast_v1_) {
+-        kde_screencast_stream_v1_ = zkde_screencast_unstable_v1_stream_output(kde_screencast_v1_, output, ZKDE_SCREENCAST_UNSTABLE_V1_POINTER_EMBEDDED);
++        std::string window_uuid;
++        if (lizardbyte::common::get_env("SUNSHINE_KWIN_WINDOW_UUID", window_uuid) && !window_uuid.empty()) {
++          // The compositor validates the identifier. A failed explicit window
++          // request must not silently capture a different desktop source.
++          kde_screencast_stream_v1_ = zkde_screencast_unstable_v1_stream_window(kde_screencast_v1_, window_uuid.c_str(), ZKDE_SCREENCAST_UNSTABLE_V1_POINTER_EMBEDDED);
++          BOOST_LOG(info) << "[kwingrab] Requested explicit fullscreen window capture"sv;
++        } else {
++          kde_screencast_stream_v1_ = zkde_screencast_unstable_v1_stream_output(kde_screencast_v1_, output, ZKDE_SCREENCAST_UNSTABLE_V1_POINTER_EMBEDDED);
++        }
+         zkde_screencast_stream_unstable_v1_add_listener(kde_screencast_stream_v1_, &stream_listener, this);
+       } else {
+         // No screencast protocol found. Output an error based on newly initialized permission file.

@@ -27,6 +27,13 @@ endif ()
 
 project(moonlight VERSION ${MOONLIGHT_VERSION} LANGUAGES C)
 
+option(MOONLIGHT_REDACT_BUILD_PATHS "Replace local checkout paths in binaries" ON)
+set(MOONLIGHT_FILE_ROOT "${CMAKE_SOURCE_DIR}")
+if (MOONLIGHT_REDACT_BUILD_PATHS AND CMAKE_C_COMPILER_ID MATCHES "GNU|Clang")
+    set(MOONLIGHT_FILE_ROOT "/usr/src/moonlight-tv")
+    add_compile_options("-ffile-prefix-map=${CMAKE_SOURCE_DIR}=${MOONLIGHT_FILE_ROOT}")
+endif ()
+
 # To suppress warnings for MbedTLS
 if (POLICY CMP0048)
     cmake_policy(SET CMP0048 NEW)
@@ -256,7 +263,7 @@ set_target_properties(moonlight-lib PROPERTIES
         )
 
 target_compile_definitions(moonlight-lib PUBLIC "$<$<CONFIG:DEBUG>:DEBUG>")
-string(LENGTH ${CMAKE_SOURCE_DIR} SOURCE_DIR_LENGTH)
+string(LENGTH "${MOONLIGHT_FILE_ROOT}" SOURCE_DIR_LENGTH)
 target_compile_definitions(moonlight-lib PUBLIC SOURCE_DIR_LENGTH=${SOURCE_DIR_LENGTH})
 target_compile_definitions(moonlight-lib PUBLIC APP_VERSION="${PROJECT_VERSION}" APPLOG_HOST=1)
 target_compile_definitions(moonlight-lib PUBLIC LV_LVGL_H_INCLUDE_SIMPLE=1)

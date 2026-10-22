@@ -1,0 +1,16 @@
+# Nonsecret baseline deployed to ~/.config/sunshine/sunshine.conf.
+# Runtime credentials/certificates remain outside this repository.
+# Allow admin requests from localhost only; this is access control, not a
+# separate loopback socket bind. Global bind_address would also affect streams.
+origin_web_ui_allowed = pc
+# Never request router port forwarding.
+upnp = disabled
+# NVIDIA hardware encoder; select the encoder supported by your host.
+encoder = nvenc
+# Disable optional tray initialization on hosts without a compatible tray.
+# Supported by installed revision 019b1ba661d829e334706557a3e2bdc3d2374591.
+system_tray = disabled
+# Optional: set your playback sink, obtained with `pactl list short sinks`.
+# audio_sink = YOUR_PLAYBACK_SINK
+# Keep display capture automatic pending review of KDE Wayland capture permissions.
+# No resolution/refresh changes, preparation commands, or launcher overrides.

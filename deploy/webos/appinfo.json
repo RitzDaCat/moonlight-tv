@@ -1,10 +1,10 @@
 {
     "id": "@WEBOS_APPINFO_ID@",
     "version": "@PROJECT_VERSION@",
-    "vendor": "Mariotaku Lee",
+    "vendor": "RitzDaCat / Moonlight TV contributors",
     "type": "native",
     "main": "bin/moonlight",
-    "title": "Moonlight",
+    "title": "Moonlight TV",
     "icon": "icon.png",
     "iconColor": "#ffffff",
     "largeIcon": "icon_large.png",

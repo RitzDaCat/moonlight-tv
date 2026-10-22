@@ -1,0 +1,6 @@
+# Experimental overlay for the staged latency candidate, merged with existing settings.
+# Image quality, bitrate bursts and LG decode/presentation still require a live comparison.
+encoder = nvenc
+nvenc_preset = 1
+nvenc_twopass = disabled
+nvenc_split_encode = enabled

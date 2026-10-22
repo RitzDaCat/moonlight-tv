@@ -122,3 +122,19 @@ Temporary Items
 .virtualenv
 # Machine-local MCP server config
 .mcp.json
+
+# Host runtime, credentials and generated reports
+/host/runtime/
+/host/sunshine-build/
+/host/packages/
+/code-review/
+/keys/
+/.webos/
+/.env
+/.env.*
+*.key
+*.pem
+*.p12
+*.pfx
+*.ipk
+__pycache__/

@@ -1,0 +1,214 @@
+diff --git a/src/rtsp.cpp b/src/rtsp.cpp
+index 423df9d4..c111fc0a 100644
+--- a/src/rtsp.cpp
++++ b/src/rtsp.cpp
+@@ -31,6 +31,7 @@ extern "C" {
+ #include "stream.h"
+ #include "sync.h"
+ #include "video.h"
++#include "video_packet_size.h"
+ 
+ namespace asio = boost::asio;
+ 
+@@ -1152,7 +1153,13 @@ namespace rtsp_stream {
+         util::from_view(args.at("x-nv-audio.surround.AudioQuality"sv));
+ 
+       config.controlProtocolType = (int) util::from_view(args.at("x-nv-general.useReliableUdp"sv));
+-      config.packetsize = (int) util::from_view(args.at("x-nv-video[0].packetSize"sv));
++      const auto requested_packet_size = stream::parse_video_packet_size(args.at("x-nv-video[0].packetSize"sv));
++      if (!requested_packet_size) {
++        BOOST_LOG(warning) << "Rejecting invalid client video packet size"sv;
++        respond(sock, session, &option, 400, "BAD REQUEST", req->sequenceNumber, {});
++        return;
++      }
++      config.packetsize = *requested_packet_size;
+       config.minRequiredFecPackets = (int) util::from_view(args.at("x-nv-vqos[0].fec.minRequiredFecPackets"sv));
+       config.mlFeatureFlags = (int) util::from_view(args.at("x-ml-general.featureFlags"sv));
+       config.audioQosType = (int) util::from_view(args.at("x-nv-aqos.qosTrafficType"sv));
+@@ -1181,6 +1188,12 @@ namespace rtsp_stream {
+         }
+       }
+ 
++      if (!stream::video_packet_payload_size(config.packetsize, sizeof(NV_VIDEO_PACKET), config.encryptionFlagsEnabled & SS_ENC_VIDEO)) {
++        BOOST_LOG(warning) << "Rejecting video packet size that cannot fit the transport headers"sv;
++        respond(sock, session, &option, 400, "BAD REQUEST", req->sequenceNumber, {});
++        return;
++      }
++
+       config.monitor.height = (int) util::from_view(args.at("x-nv-video[0].clientViewportHt"sv));
+       config.monitor.width = (int) util::from_view(args.at("x-nv-video[0].clientViewportWd"sv));
+       config.monitor.framerate = (int) util::from_view(args.at("x-nv-video[0].maxFPS"sv));
+diff --git a/src/stream.cpp b/src/stream.cpp
+index 5c232c4f..b1c02cff 100644
+--- a/src/stream.cpp
++++ b/src/stream.cpp
+@@ -36,6 +36,7 @@ extern "C" {
+ #include "system_tray.h"
+ #include "thread_safe.h"
+ #include "utility.h"
++#include "video_packet_size.h"
+ 
+ constexpr int IDX_START_A = 0;  ///< Control-stream message index for the first stream-start packet.
+ constexpr int IDX_START_B = 1;  ///< Control-stream message index for the second stream-start packet.
+@@ -164,6 +165,10 @@ namespace stream {
+     std::uint8_t tag[16];  ///< Authentication tag appended to the encrypted payload.
+   };
+ 
++  static_assert(VIDEO_RTP_HEADER_SIZE == MAX_RTP_HEADER_SIZE);
++  static_assert(VIDEO_ENCRYPTION_PREFIX_SIZE == sizeof(video_packet_enc_prefix_t));
++  static_assert(sizeof(video_packet_raw_t) == VIDEO_RTP_HEADER_SIZE + sizeof(NV_VIDEO_PACKET));
++
+   /**
+    * @brief Packed RTP header for an audio packet.
+    */
+@@ -1553,6 +1558,13 @@ namespace stream {
+       frame_network_latency_logger.first_point_now();
+ 
+       auto session = (session_t *) packet->channel_data;
++      const auto checked_payload_size = video_packet_payload_size(session->config.packetsize, sizeof(NV_VIDEO_PACKET), bool(session->video.cipher));
++      if (!checked_payload_size) {
++        BOOST_LOG(error) << "Stopping stream with invalid video packet size: "sv << session->config.packetsize;
++        session->shutdown_event->raise(true);
++        continue;
++      }
++      const auto payload_blocksize = *checked_payload_size;
+       auto lowseq = session->video.lowseq;
+ 
+       std::string_view payload {(char *) packet->data(), packet->data_size()};
+@@ -1577,9 +1589,9 @@ namespace stream {
+       frame_header.frameType = packet->is_idr()                     ? 2 :
+                                packet->after_ref_frame_invalidation ? 5 :
+                                                                       1;
+-      frame_header.lastPayloadLen = (payload.size() + sizeof(frame_header)) % (session->config.packetsize - sizeof(NV_VIDEO_PACKET));
++      frame_header.lastPayloadLen = (payload.size() + sizeof(frame_header)) % payload_blocksize;
+       if (frame_header.lastPayloadLen == 0) {
+-        frame_header.lastPayloadLen = session->config.packetsize - sizeof(NV_VIDEO_PACKET);
++        frame_header.lastPayloadLen = payload_blocksize;
+       }
+ 
+       if (packet->frame_timestamp) {
+@@ -1599,7 +1611,6 @@ namespace stream {
+ 
+       // Insert space for packet headers
+       auto blocksize = session->config.packetsize + MAX_RTP_HEADER_SIZE;
+-      auto payload_blocksize = blocksize - sizeof(video_packet_raw_t);
+       auto payload_new = concat_and_insert(sizeof(video_packet_raw_t), payload_blocksize, std::string_view {(char *) &frame_header, sizeof(frame_header)}, payload);
+ 
+       payload = std::string_view {(char *) payload_new.data(), payload_new.size()};
+diff --git a/src/video_packet_size.h b/src/video_packet_size.h
+new file mode 100644
+index 00000000..bdbf30d7
+--- /dev/null
++++ b/src/video_packet_size.h
+@@ -0,0 +1,54 @@
++/**
++ * @file src/video_packet_size.h
++ * @brief Validate negotiated video packet sizes before packet arithmetic.
++ */
++#pragma once
++
++// standard includes
++#include <charconv>
++#include <cstddef>
++#include <cstdint>
++#include <optional>
++#include <string_view>
++
++// local includes
++#include "config.h"
++
++namespace stream {
++  inline constexpr std::size_t VIDEO_RTP_HEADER_SIZE = 16;
++  inline constexpr std::size_t VIDEO_ENCRYPTION_PREFIX_SIZE = 32;
++  inline constexpr std::size_t MAX_VIDEO_UDP_PAYLOAD_SIZE = 65507;
++
++  /**
++   * @brief Parse a packet size without narrowing or accepting trailing text.
++   */
++  inline std::optional<int> parse_video_packet_size(std::string_view text) {
++    if (text.empty()) {
++      return std::nullopt;
++    }
++    std::int64_t value {};
++    const auto [end, error] = std::from_chars(text.data(), text.data() + text.size(), value);
++    if (error != std::errc {} || end != text.data() + text.size() || value < config::PACKETSIZE_MIN || value > config::PACKETSIZE_MAX) {
++      return std::nullopt;
++    }
++    return static_cast<int>(value);
++  }
++
++  /**
++   * @brief Return positive video bytes per packet that fit an IPv4 UDP datagram.
++   *
++   * Packet size includes the GameStream video header, but excludes the RTP
++   * header and optional encryption prefix added by the video broadcaster.
++   */
++  inline std::optional<std::size_t> video_packet_payload_size(std::int64_t packet_size, std::size_t video_header_size, bool encrypted) {
++    if (packet_size < config::PACKETSIZE_MIN || packet_size > config::PACKETSIZE_MAX) {
++      return std::nullopt;
++    }
++    const auto size = static_cast<std::size_t>(packet_size);
++    const auto prefix_size = encrypted ? VIDEO_ENCRYPTION_PREFIX_SIZE : 0;
++    if (size <= video_header_size || size + VIDEO_RTP_HEADER_SIZE + prefix_size > MAX_VIDEO_UDP_PAYLOAD_SIZE) {
++      return std::nullopt;
++    }
++    return size - video_header_size;
++  }
++}  // namespace stream
+diff --git a/tests/unit/test_video_packet_size.cpp b/tests/unit/test_video_packet_size.cpp
+new file mode 100644
+index 00000000..dff3169b
+--- /dev/null
++++ b/tests/unit/test_video_packet_size.cpp
+@@ -0,0 +1,51 @@
++/**
++ * @file tests/unit/test_video_packet_size.cpp
++ * @brief Video packet negotiation and UDP geometry regressions.
++ */
++#include <gtest/gtest.h>
++#include <src/video_packet_size.h>
++
++extern "C" {
++#include <moonlight-common-c/src/Limelight.h>
++#include <moonlight-common-c/src/Video.h>
++}
++
++static_assert(sizeof(NV_VIDEO_PACKET) == 16);
++static_assert(stream::VIDEO_RTP_HEADER_SIZE == MAX_RTP_HEADER_SIZE);
++static_assert(stream::VIDEO_ENCRYPTION_PREFIX_SIZE == sizeof(ENC_VIDEO_HEADER));
++
++TEST(VideoPacketSizeTests, RejectsUndersizedMalformedAndNarrowingInputs) {
++  for (const auto text : {"", "0", "16", "-1", "199", "1392oops", "65536", "4294968688", "9223372036854775808"}) {
++    EXPECT_FALSE(stream::parse_video_packet_size(text)) << text;
++  }
++  for (const auto size : {-1, 0, 16, 199, 65536}) {
++    EXPECT_FALSE(stream::video_packet_payload_size(size, 16, false)) << size;
++    EXPECT_FALSE(stream::video_packet_payload_size(size, 16, true)) << size;
++  }
++}
++
++TEST(VideoPacketSizeTests, PreservesNormalPacketPayloadsAndConfiguredBounds) {
++  EXPECT_EQ(stream::parse_video_packet_size("200"), 200);
++  EXPECT_EQ(stream::parse_video_packet_size("1392"), 1392);
++  EXPECT_EQ(stream::parse_video_packet_size("1456"), 1456);
++  EXPECT_EQ(stream::parse_video_packet_size("65535"), 65535);
++  EXPECT_EQ(stream::video_packet_payload_size(200, 16, false), 184);
++  EXPECT_EQ(stream::video_packet_payload_size(1392, 16, false), 1376);
++  EXPECT_EQ(stream::video_packet_payload_size(1392, 16, true), 1376);
++  EXPECT_EQ(stream::video_packet_payload_size(1456, 16, true), 1440);
++}
++
++TEST(VideoPacketSizeTests, ReservesRtpAndEncryptionBytesWithinUdpLimit) {
++  // UDP's IPv4 payload limit is 65507 bytes, including every video header.
++  EXPECT_EQ(stream::video_packet_payload_size(65491, 16, false), 65475);
++  EXPECT_FALSE(stream::video_packet_payload_size(65492, 16, false));
++  EXPECT_EQ(stream::video_packet_payload_size(65459, 16, true), 65443);
++  EXPECT_FALSE(stream::video_packet_payload_size(65460, 16, true));
++  EXPECT_FALSE(stream::video_packet_payload_size(65535, 16, false));
++  EXPECT_FALSE(stream::video_packet_payload_size(65535, 16, true));
++}
++
++TEST(VideoPacketSizeTests, RejectsHeadersWithoutPositiveVideoPayload) {
++  EXPECT_FALSE(stream::video_packet_payload_size(200, 200, false));
++  EXPECT_FALSE(stream::video_packet_payload_size(200, 201, false));
++}

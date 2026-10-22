@@ -1,0 +1,471 @@
+--- a/src/platform/linux/cuda.cpp
++++ b/src/platform/linux/cuda.cpp
+@@ -25,6 +25,9 @@
+ #include "src/utility.h"
+ #include "src/video.h"
+ #include "src/video_latency_profile.h"
++#include "dmabuf_import_cache.h"
++#include <cstdlib>
++#include <string_view>
+ #include "wayland.h"
+ 
+ /**
+@@ -457,7 +460,6 @@
+       height = in_height;
+ 
+       sequence = 0;
+-
+       this->offset_x = offset_x;
+       this->offset_y = offset_y;
+ 
+@@ -540,31 +542,49 @@
+     int convert(platf::img_t &img) override {
+       auto &descriptor = (egl::img_descriptor_t &) img;
+ 
++      const egl::rgb_t *source_rgb = nullptr;
+       {
+         auto import_timer = profile.scope(video_latency::stage::import);
+ 
+         if (descriptor.sequence == 0) {
+-          // For dummy images, use a blank RGB texture instead of importing a DMA-BUF
++          // Dummy frames have no DMA-BUF identity; preserve the blank fallback.
+           rgb = egl::create_blank(img);
+-        } else if (descriptor.sequence > sequence) {
+-          sequence = descriptor.sequence;
+-
+-          rgb = egl::rgb_t {};
+-
+-          auto rgb_opt = egl::import_source(display.get(), descriptor.sd);
+-
+-          if (!rgb_opt) {
+-            return -1;
++          source_rgb = &rgb;
++        } else if (!cache_source_imports) {
++          if (descriptor.sequence > sequence) {
++            sequence = descriptor.sequence;
++            rgb = egl::rgb_t {};
++            auto imported = egl::import_source(display.get(), descriptor.sd);
++            if (!imported) return -1;
++            rgb = std::move(*imported);
+           }
+-
+-          rgb = std::move(*rgb_opt);
++          source_rgb = &rgb;
++        } else {
++          dma_import::surface source;
++          source.width = descriptor.sd.width;
++          source.height = descriptor.sd.height;
++          source.fourcc = descriptor.sd.fourcc;
++          source.modifier = descriptor.sd.modifier;
++          for (std::size_t p = 0; p < 4; ++p) {
++            source.fds[p] = descriptor.sd.fds[p];
++            if (source.fds[p] >= 0) {
++              source.pitches[p] = descriptor.sd.pitches[p];
++              source.offsets[p] = descriptor.sd.offsets[p];
++            }
++          }
++          source_rgb = source_imports.get(source, [&](const dma_import::surface &pinned) {
++            auto retained = descriptor.sd;
++            for (std::size_t p = 0; p < 4; ++p) retained.fds[p] = pinned.fds[p];
++            return egl::import_source(display.get(), retained);
++          });
++          if (!source_rgb) return -1;
+         }
+       }
+ 
+       auto fmt_desc = av_pix_fmt_desc_get(sw_format);
+ 
+       profile.measure(video_latency::stage::rgb_prepare, [&]() {
+-        sws.load_vram(descriptor, offset_x, offset_y, rgb->tex[0], is_yuv444);
++        sws.load_vram(descriptor, offset_x, offset_y, (*source_rgb)->tex[0], is_yuv444);
+       });
+ 
+       if (is_yuv444) {
+@@ -659,8 +679,13 @@
+     int height;  ///< Frame or display height in pixels.
+     int width;  ///< Frame or display width in pixels.
+ 
+-    std::uint64_t sequence;  ///< Capture sequence number associated with the frame.
+-    egl::rgb_t rgb;  ///< Imported RGB source image used before CUDA conversion.
++    std::uint64_t sequence = 0;  ///< Capture sequence for the unchanged uncached route.
++    const bool cache_source_imports = []() {
++      const char *value = std::getenv("SUNSHINE_CACHE_DMABUF_IMPORTS");
++      return value && std::string_view(value) == "1";
++    }();  ///< Opt-in until real cross-context capture synchronization is validated.
++    egl::rgb_t rgb;  ///< Blank or uncached source view.
++    dma_import::cache<egl::rgb_t> source_imports;  ///< Four imports pinned by DMA-BUF identity and full layout.
+     video_latency::profile_t profile;  ///< Opt-in CPU-wall measurements; GPU durations are not inferred.
+ 
+     cu_resources cu_res;  ///< CUDA graphics resources registered for the current frame.
+diff --git a/src/platform/linux/dmabuf_import_cache.h b/src/platform/linux/dmabuf_import_cache.h
+new file mode 100644
+--- /dev/null
++++ b/src/platform/linux/dmabuf_import_cache.h
+@@ -0,0 +1,168 @@
++// SPDX-License-Identifier: GPL-3.0-only
++/** @file dmabuf_import_cache.h
++ * @brief Bounded owner-thread cache of imported DMA-BUF views with pinned
++ * identity.
++ */
++#pragma once
++#include <algorithm>
++#include <array>
++#include <cstddef>
++#include <cstdint>
++#include <fcntl.h>
++#include <memory>
++#include <optional>
++#include <sys/stat.h>
++#include <unistd.h>
++#include <utility>
++
++namespace dma_import {
++/** @brief Full source layout; negative descriptors mark unused planes. */
++struct surface {
++  int width = 0, height = 0;
++  std::uint32_t fourcc = 0;
++  std::uint64_t modifier = 0;
++  std::array<int, 4> fds{-1, -1, -1, -1};
++  std::array<std::uint32_t, 4> pitches{}, offsets{};
++};
++/** @brief Hold exported objects alive so inode reuse cannot produce a false
++ * hit. */
++struct owned_fds {
++  std::array<int, 4> values{-1, -1, -1, -1};
++  owned_fds() = default;
++  owned_fds(const owned_fds &) = delete;
++  owned_fds &operator=(const owned_fds &) = delete;
++  ~owned_fds() {
++    for (int fd : values)
++      if (fd >= 0)
++        close(fd);
++  }
++};
++/** @brief Validate identity/layout on every lookup; import only on bounded
++ * misses. Importer receives descriptors owned by the new entry and returns
++ * optional<Value>. Values and retained descriptors are released on the owning
++ * graphics thread. Return pointers survive until eviction, clear, or the next
++ * uncached fallback.
++ */
++template <class Value, std::size_t Capacity = 4> class cache {
++  static_assert(Capacity > 0);
++  /** @brief Include every plane's object identity and byte interpretation. */
++  struct key {
++    surface layout;
++    std::array<dev_t, 4> devices{};
++    std::array<ino_t, 4> inodes{};
++    std::array<bool, 4> used{};
++    bool operator==(const key &b) const {
++      return layout.width == b.layout.width &&
++             layout.height == b.layout.height &&
++             layout.fourcc == b.layout.fourcc &&
++             layout.modifier == b.layout.modifier &&
++             layout.pitches == b.layout.pitches &&
++             layout.offsets == b.layout.offsets && devices == b.devices &&
++             inodes == b.inodes && used == b.used;
++    }
++  };
++  /** @brief Value is destroyed before its pinned descriptors. */
++  struct entry {
++    key identity;
++    owned_fds descriptors;
++    std::optional<Value> value;
++  };
++  std::array<std::unique_ptr<entry>, Capacity> entries{};
++  std::array<std::size_t, Capacity> order{};
++  std::optional<Value> fallback;
++  /** @brief Reject unknown identities and preserve the original uncached route.
++   */
++  static std::optional<key> identify(const surface &source) {
++    if (source.width <= 0 || source.height <= 0)
++      return std::nullopt;
++    key result;
++    result.layout = source;
++    bool any = false;
++    for (std::size_t p = 0; p < 4; ++p) {
++      if (source.fds[p] < 0)
++        continue;
++      struct stat info{};
++      if (fstat(source.fds[p], &info) || info.st_ino == 0)
++        return std::nullopt;
++      result.used[p] = true;
++      result.devices[p] = info.st_dev;
++      result.inodes[p] = info.st_ino;
++      any = true;
++    }
++    return any ? std::optional<key>(result) : std::nullopt;
++  }
++  /** @brief Promote an array slot without allocating or a wrapping age counter.
++   */
++  void promote(std::size_t position) {
++    auto slot = order[position];
++    std::move_backward(order.begin(), order.begin() + position,
++                       order.begin() + position + 1);
++    order[0] = slot;
++  }
++
++public:
++  cache() {
++    for (std::size_t i = 0; i < Capacity; ++i)
++      order[i] = i;
++  }
++  cache(const cache &) = delete;
++  cache &operator=(const cache &) = delete;
++  /** @brief Release all held imports while the owner graphics context is
++   * current. */
++  void clear() {
++    for (auto &item : entries)
++      item.reset();
++    fallback.reset();
++  }
++  /** @brief Obtain an identity-safe import, preserving old entries if import
++   * fails. */
++  template <class Importer>
++  const Value *get(const surface &source, Importer &&importer) {
++    auto identity = identify(source);
++    if (!identity) {
++      auto value = importer(source);
++      fallback = std::move(value);
++      return fallback ? &*fallback : nullptr;
++    }
++    for (std::size_t position = 0; position < Capacity; ++position) {
++      auto &item = entries[order[position]];
++      if (item && item->identity == *identity) {
++        auto result = &*item->value;
++        promote(position);
++        return result;
++      }
++    }
++    auto candidate = std::make_unique<entry>();
++    surface retained = source;
++    for (std::size_t p = 0; p < 4; ++p) {
++      if (source.fds[p] < 0)
++        continue;
++      int fd = fcntl(source.fds[p], F_DUPFD_CLOEXEC, 0);
++      if (fd < 0) {
++        auto value = importer(source);
++        fallback = std::move(value);
++        return fallback ? &*fallback : nullptr;
++      }
++      candidate->descriptors.values[p] = retained.fds[p] = fd;
++    }
++    auto retained_identity = identify(retained);
++    if (!retained_identity || !(*identity == *retained_identity))
++      return nullptr;
++    candidate->value = importer(retained);
++    if (!candidate->value)
++      return nullptr;
++    candidate->identity = *identity;
++    // Prefer an empty slot; eviction occurs only after successful import.
++    std::size_t position = Capacity - 1;
++    for (std::size_t p = 0; p < Capacity; ++p)
++      if (!entries[order[p]]) {
++        position = p;
++        break;
++      }
++    entries[order[position]] = std::move(candidate);
++    auto result = &*entries[order[position]]->value;
++    promote(position);
++    return result;
++  }
++};
++} // namespace dma_import
+diff --git a/tests/unit/test_dmabuf_import_cache.cpp b/tests/unit/test_dmabuf_import_cache.cpp
+new file mode 100644
+--- /dev/null
++++ b/tests/unit/test_dmabuf_import_cache.cpp
+@@ -0,0 +1,194 @@
++// SPDX-License-Identifier: GPL-3.0-only
++/** @file dmabuf_cache_test.cpp
++ * @brief Identity, layout, failure atomicity, LRU and descriptor lifetime
++ * regressions.
++ */
++#include "src/platform/linux/dmabuf_import_cache.h"
++#include <cstdio>
++#ifndef DMABUF_CACHE_STANDALONE
++#include <gtest/gtest.h>
++#endif
++#include <filesystem>
++#include <memory>
++#include <stdexcept>
++#include <string>
++/** @brief Reject a failed regression check. */
++static void expect(bool ok, const char *why) {
++  if (!ok)
++    throw std::runtime_error(why);
++}
++/** @brief Auto-remove unnamed temporary files even when an assertion throws. */
++struct Closer {
++  void operator()(FILE *f) const { std::fclose(f); }
++};
++/** @brief Imported object whose teardown must precede closing retained
++ * descriptors. */
++struct Value {
++  int fd, id;
++  bool *lifetime_ok;
++  Value(int f, int n, bool *ok) : fd(f), id(n), lifetime_ok(ok) {}
++  Value(const Value &) = delete;
++  Value &operator=(const Value &) = delete;
++  Value(Value &&b) noexcept
++      : fd(std::exchange(b.fd, -1)), id(b.id), lifetime_ok(b.lifetime_ok) {}
++  Value &operator=(Value &&b) noexcept {
++    if (this != &b) {
++      verify();
++      fd = std::exchange(b.fd, -1);
++      id = b.id;
++      lifetime_ok = b.lifetime_ok;
++    }
++    return *this;
++  }
++  void verify() {
++    if (fd >= 0) {
++      struct stat s{};
++      if (fstat(fd, &s))
++        *lifetime_ok = false;
++    }
++  }
++  ~Value() { verify(); }
++};
++/** @brief Count open descriptors to detect miss/failure/clear leaks. */
++static unsigned fds() {
++  unsigned n = 0;
++  for (auto &item : std::filesystem::directory_iterator("/proc/self/fd")) {
++    (void)item;
++    ++n;
++  }
++  return n;
++}
++/** @brief Exercise eight independent cache/resource invariants. */
++static unsigned run_cache_regressions() {
++  auto before = fds();
++  bool lifetime_ok = true;
++  unsigned scenarios = 0;
++  {
++    std::array<std::unique_ptr<FILE, Closer>, 4> files;
++    for (auto &f : files) {
++      f.reset(std::tmpfile());
++      expect(bool(f), "tmpfile failed");
++    }
++    auto surface = [&](unsigned i) {
++      dma_import::surface s;
++      s.width = 1920;
++      s.height = 1080;
++      s.fourcc = 42;
++      s.modifier = 7;
++      s.fds[0] = fileno(files[i].get());
++      s.pitches[0] = 7680;
++      return s;
++    };
++    int created = 0;
++    bool fail = false;
++    auto importer = [&](const dma_import::surface &s) -> std::optional<Value> {
++      if (fail)
++        return std::nullopt;
++      return std::optional<Value>(std::in_place, s.fds[0], ++created,
++                                  &lifetime_ok);
++    };
++    {
++      dma_import::cache<Value, 2> cache;
++      auto a = surface(0), b = surface(1), c = surface(2), d = surface(3);
++      int aid = cache.get(a, importer)->id, bid = cache.get(b, importer)->id;
++      expect(cache.get(a, importer)->id == aid, "Cache hit rebuilt view");
++      cache.get(c, importer);
++      expect(cache.get(a, importer)->id == aid, "MRU hit was evicted");
++      expect(cache.get(b, importer)->id != bid, "LRU miss reused evicted view");
++      ++scenarios;
++      auto keep = cache.get(a, importer)->id;
++      auto count = fds();
++      fail = true;
++      expect(cache.get(d, importer) == nullptr,
++             "Failed importer returned view");
++      expect(fds() == count, "Failed import leaked pinned descriptors");
++      fail = false;
++      expect(cache.get(a, importer)->id == keep,
++             "Failed import evicted a valid view");
++      ++scenarios;
++      // Every layout change must invalidate even when the exported object is
++      // unchanged.
++      for (unsigned change = 0; change < 6; ++change) {
++        auto x = a;
++        switch (change) {
++        case 0:
++          ++x.width;
++          break;
++        case 1:
++          ++x.height;
++          break;
++        case 2:
++          ++x.fourcc;
++          break;
++        case 3:
++          ++x.modifier;
++          break;
++        case 4:
++          ++x.pitches[0];
++          break;
++        case 5:
++          ++x.offsets[0];
++          break;
++        }
++        int previous = created;
++        expect(cache.get(x, importer) && created == previous + 1,
++               "Layout change reused old view");
++      }
++      ++scenarios;
++      auto multi = a;
++      multi.fds[1] = b.fds[0];
++      multi.pitches[1] = 3840;
++      auto id = cache.get(multi, importer)->id;
++      multi.fds[1] = c.fds[0];
++      expect(cache.get(multi, importer)->id != id,
++             "Second plane identity ignored");
++      ++scenarios;
++      // Reuse the same integer descriptor for a different object; the old one
++      // is pinned.
++      cache.clear();
++      auto original = cache.get(a, importer)->id;
++      expect(dup2(b.fds[0], a.fds[0]) == a.fds[0], "dup2 failed");
++      expect(cache.get(a, importer)->id != original,
++             "Integer FD reuse produced stale hit");
++      ++scenarios;
++      // Unknown identities must remain uncached; callback failure must not
++      // return stale fallback.
++      auto unknown = a;
++      unknown.fds[0] = -1;
++      int start = created;
++      expect(cache.get(unknown, importer) && cache.get(unknown, importer) &&
++                 created == start + 2,
++             "Unknown identity was cached");
++      fail = true;
++      expect(!cache.get(unknown, importer),
++             "Fallback failure returned old value");
++      fail = false;
++      ++scenarios;
++      cache.clear();
++      expect(lifetime_ok, "Descriptors closed before imported values");
++      ++scenarios;
++    }
++  }
++  expect(lifetime_ok && fds() == before,
++         "Cache teardown leaked descriptors or invalidated view lifetime");
++  ++scenarios;
++  return scenarios;
++}
++#ifdef DMABUF_CACHE_STANDALONE
++/** @brief Run without framework dependencies for focused sanitizer validation.
++ */
++int main() {
++  try {
++    std::printf("%u regression scenarios passed\n", run_cache_regressions());
++    return 0;
++  } catch (const std::exception &e) {
++    std::fprintf(stderr, "%s\n", e.what());
++    return 1;
++  }
++}
++#else
++TEST(DmabufImportCache,
++     PreservesIdentityLayoutFailureAtomicityAndDescriptorLifetimes) {
++  EXPECT_EQ(run_cache_regressions(), 8u);
++}
++#endif

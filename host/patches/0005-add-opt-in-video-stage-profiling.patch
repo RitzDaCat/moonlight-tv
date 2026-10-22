@@ -1,0 +1,527 @@
+diff --git a/src/platform/linux/cuda.cpp b/src/platform/linux/cuda.cpp
+index 43cb5e6..41d0fef 100644
+--- a/src/platform/linux/cuda.cpp
++++ b/src/platform/linux/cuda.cpp
+@@ -24,6 +24,7 @@ extern "C" {
+ #include "src/logging.h"
+ #include "src/utility.h"
+ #include "src/video.h"
++#include "src/video_latency_profile.h"
+ #include "wayland.h"
+ 
+ /**
+@@ -407,6 +408,13 @@ namespace cuda {
+    */
+   class gl_cuda_vram_t: public platf::avcodec_encode_device_t {
+   public:
++    /** @brief Report opt-in CPU-wall measurements before conversion resources are released. */
++    ~gl_cuda_vram_t() override {
++      if (profile.enabled()) {
++        BOOST_LOG(info) << profile.report("linux-egl-cuda");
++      }
++    }
++
+     /**
+      * @brief Initialize the GL->CUDA encoding device.
+      * @param in_width Width of captured frames.
+@@ -532,34 +540,47 @@ namespace cuda {
+     int convert(platf::img_t &img) override {
+       auto &descriptor = (egl::img_descriptor_t &) img;
+ 
+-      if (descriptor.sequence == 0) {
+-        // For dummy images, use a blank RGB texture instead of importing a DMA-BUF
+-        rgb = egl::create_blank(img);
+-      } else if (descriptor.sequence > sequence) {
+-        sequence = descriptor.sequence;
++      {
++        auto import_timer = profile.scope(video_latency::stage::import);
+ 
+-        rgb = egl::rgb_t {};
++        if (descriptor.sequence == 0) {
++          // For dummy images, use a blank RGB texture instead of importing a DMA-BUF
++          rgb = egl::create_blank(img);
++        } else if (descriptor.sequence > sequence) {
++          sequence = descriptor.sequence;
+ 
+-        auto rgb_opt = egl::import_source(display.get(), descriptor.sd);
++          rgb = egl::rgb_t {};
+ 
+-        if (!rgb_opt) {
+-          return -1;
+-        }
++          auto rgb_opt = egl::import_source(display.get(), descriptor.sd);
++
++          if (!rgb_opt) {
++            return -1;
++          }
+ 
+-        rgb = std::move(*rgb_opt);
++          rgb = std::move(*rgb_opt);
++        }
+       }
+ 
+       auto fmt_desc = av_pix_fmt_desc_get(sw_format);
+ 
+-      sws.load_vram(descriptor, offset_x, offset_y, rgb->tex[0], is_yuv444);
++      profile.measure(video_latency::stage::rgb_prepare, [&]() {
++        sws.load_vram(descriptor, offset_x, offset_y, rgb->tex[0], is_yuv444);
++      });
+ 
+       if (is_yuv444) {
+         // Perform the color conversion and scaling in GL
+-        sws.convert_yuv444(yuv444->buf);
++        profile.measure(video_latency::stage::gl_convert, [&]() {
++          return sws.convert_yuv444(yuv444->buf);
++        });
+ 
+         // Map the GL textures to read for CUDA
+         std::array<CUgraphicsResource, 3> resources = {{cu_res.y_res.get(), cu_res.u_res.get(), cu_res.v_res.get()}};
+-        CU_CHECK(cdf->cuGraphicsMapResources(resources.size(), resources.data(), stream.get()), "Couldn't map GL textures in CUDA");
++        CU_CHECK(profile.measure(video_latency::stage::map, [&]() {
++          return cdf->cuGraphicsMapResources(resources.size(), resources.data(), stream.get());
++        }),
++                 "Couldn't map GL textures in CUDA");
++
++        auto copy_timer = profile.scope(video_latency::stage::copy_unmap);
+ 
+         // Copy from the GL textures to the target CUDA frame
+         for (int i = 0; i < 3; i++) {
+@@ -580,11 +601,18 @@ namespace cuda {
+ 
+       } else {
+         // Perform the color conversion and scaling in GL
+-        sws.convert_nv12(nv12->buf);
++        profile.measure(video_latency::stage::gl_convert, [&]() {
++          return sws.convert_nv12(nv12->buf);
++        });
+ 
+         // Map the GL textures to read for CUDA
+         std::array<CUgraphicsResource, 2> resources = {{cu_res.y_res.get(), cu_res.uv_res.get()}};
+-        CU_CHECK(cdf->cuGraphicsMapResources(resources.size(), resources.data(), stream.get()), "Couldn't map GL textures in CUDA");
++        CU_CHECK(profile.measure(video_latency::stage::map, [&]() {
++          return cdf->cuGraphicsMapResources(resources.size(), resources.data(), stream.get());
++        }),
++                 "Couldn't map GL textures in CUDA");
++
++        auto copy_timer = profile.scope(video_latency::stage::copy_unmap);
+ 
+         // Copy from the GL textures to the target CUDA frame
+         for (int i = 0; i < 2; i++) {
+@@ -633,6 +661,7 @@ namespace cuda {
+ 
+     std::uint64_t sequence;  ///< Capture sequence number associated with the frame.
+     egl::rgb_t rgb;  ///< Imported RGB source image used before CUDA conversion.
++    video_latency::profile_t profile;  ///< Opt-in CPU-wall measurements; GPU durations are not inferred.
+ 
+     cu_resources cu_res;  ///< CUDA graphics resources registered for the current frame.
+ 
+diff --git a/src/platform/linux/kmsgrab.cpp b/src/platform/linux/kmsgrab.cpp
+index 81f9e7c..5775c29 100644
+--- a/src/platform/linux/kmsgrab.cpp
++++ b/src/platform/linux/kmsgrab.cpp
+@@ -27,6 +27,7 @@
+ #include "src/round_robin.h"
+ #include "src/utility.h"
+ #include "src/video.h"
++#include "src/video_latency_profile.h"
+ #include "vaapi.h"
+ #include "vulkan_encode.h"
+ #include "wayland.h"
+@@ -878,6 +879,13 @@ namespace platf {
+      */
+     class display_t: public platf::display_t {
+     public:
++      /** @brief Report diagnostic capture timing after capture has stopped. */
++      ~display_t() override {
++        if (profile.enabled()) {
++          BOOST_LOG(info) << profile.report("linux-kms");
++        }
++      }
++
+       /**
+        * @brief Initialize common KMS display state for the requested memory type.
+        *
+@@ -1379,6 +1387,7 @@ namespace platf {
+        * @return Capture status after refreshing framebuffer and cursor state.
+        */
+       inline capture_e refresh(file_t *file, egl::surface_descriptor_t *sd, std::optional<std::chrono::steady_clock::time_point> &frame_timestamp) {
++        auto timer = profile.scope(video_latency::stage::kms_refresh);
+         // Check for a change in HDR metadata
+         if (connector_id) {
+           auto connector_props = card.connector_props(*connector_id);
+@@ -1443,6 +1452,7 @@ namespace platf {
+       }
+ 
+       mem_type_e mem_type;  ///< Mem type.
++      video_latency::profile_t profile;  ///< Opt-in metadata/export timing with unchanged wire timestamps.
+ 
+       std::chrono::nanoseconds delay;  ///< Delay before the timer task becomes eligible to run.
+ 
+diff --git a/src/stream.cpp b/src/stream.cpp
+index 4e8a7fd..89b4a08 100644
+--- a/src/stream.cpp
++++ b/src/stream.cpp
+@@ -37,6 +37,7 @@ extern "C" {
+ #include "system_tray.h"
+ #include "thread_safe.h"
+ #include "utility.h"
++#include "video_latency_profile.h"
+ #include "video_packet_size.h"
+ 
+ constexpr int IDX_START_A = 0;  ///< Control-stream message index for the first stream-start packet.
+@@ -1543,6 +1544,12 @@ namespace stream {
+     crypto::aes_t iv(12);
+ 
+     fec::rs_cache_t fec_encoders;
++    video_latency::profile_t profile;
++    auto report_profile = util::fail_guard([&]() {
++      if (profile.enabled()) {
++        BOOST_LOG(info) << profile.report("video-broadcast");
++      }
++    });
+ 
+     auto timer = platf::create_high_precision_timer();
+     if (!timer || !*timer) {
+@@ -1553,6 +1560,15 @@ namespace stream {
+     auto ratecontrol_next_frame_start = std::chrono::steady_clock::now();
+ 
+     while (auto packet = packets->pop()) {
++      if (profile.enabled()) {
++        const auto now = video_latency::profile_t::clock::now();
++        if (packet->profile_enqueued) {
++          profile.observe(video_latency::stage::packet_queue, now - *packet->profile_enqueued);
++        }
++        if (packet->frame_timestamp) {
++          profile.observe(video_latency::stage::capture_to_broadcast, now - *packet->frame_timestamp);
++        }
++      }
+       if (shutdown_event->peek()) {
+         break;
+       }
+diff --git a/src/video.cpp b/src/video.cpp
+index 9f860d4..9b81d4a 100644
+--- a/src/video.cpp
++++ b/src/video.cpp
+@@ -35,6 +35,7 @@ extern "C" {
+ #include "platform/common.h"
+ #include "sync.h"
+ #include "video.h"
++#include "video_latency_profile.h"
+ 
+ #ifdef _WIN32
+ extern "C" {
+@@ -452,6 +453,9 @@ namespace video {
+     avcodec_encode_session_t(avcodec_encode_session_t &&other) noexcept = default;
+ 
+     ~avcodec_encode_session_t() {
++      if (profile.enabled()) {
++        BOOST_LOG(info) << profile.report(avcodec_ctx && avcodec_ctx->codec ? avcodec_ctx->codec->name : "avcodec");
++      }
+       // Flush any remaining frames in the encoder if the encoder started up (frame num > 0)
+       if (avcodec_ctx->frame_num > 0 && avcodec_send_frame(avcodec_ctx.get(), nullptr) == 0) {
+         packet_raw_avcodec pkt;
+@@ -478,6 +482,7 @@ namespace video {
+       vps = std::move(other.vps);
+ 
+       inject = other.inject;
++      profile = std::move(other.profile);
+ 
+       return *this;
+     }
+@@ -492,6 +497,10 @@ namespace video {
+       if (!device) {
+         return -1;
+       }
++      if (profile.enabled() && img.frame_timestamp) {
++        profile.observe(video_latency::stage::capture_to_consume, video_latency::profile_t::clock::now() - *img.frame_timestamp);
++      }
++      auto timer = profile.scope(video_latency::stage::convert_total);
+       return device->convert(img);
+     }
+ 
+@@ -529,6 +538,7 @@ namespace video {
+     }
+ 
+     avcodec_ctx_t avcodec_ctx;  ///< FFmpeg codec context owned by the encode session.
++    video_latency::profile_t profile;  ///< Opt-in single-owner encode/conversion CPU-wall timing.
+     std::unique_ptr<platf::avcodec_encode_device_t> device;  ///< Platform device used by the FFmpeg hardware encoder.
+ 
+     std::vector<packet_raw_t::replace_t> replacements;  ///< NAL-unit byte ranges that must be replaced before packet send.
+@@ -1799,6 +1809,7 @@ namespace video {
+    * @return 0 when packets are queued; nonzero when encoding or packetization fails.
+    */
+   int encode_avcodec(int64_t frame_nr, avcodec_encode_session_t &session, safe::mail_raw_t::queue_t<packet_t> &packets, void *channel_data, std::optional<std::chrono::steady_clock::time_point> frame_timestamp) {
++    auto timer = session.profile.scope(video_latency::stage::encode_enqueue);
+     auto &frame = session.device->frame;
+     frame->pts = frame_nr;
+ 
+@@ -1866,6 +1877,9 @@ namespace video {
+ 
+       packet->replacements = &session.replacements;
+       packet->channel_data = channel_data;
++      if (session.profile.enabled()) {
++        packet->profile_enqueued = video_latency::profile_t::clock::now();
++      }
+       packets->raise(std::move(packet));
+     }
+ 
+diff --git a/src/video.h b/src/video.h
+index 63f3cf5..970b9e9 100644
+--- a/src/video.h
++++ b/src/video.h
+@@ -531,6 +531,7 @@ namespace video {
+     void *channel_data = nullptr;  ///< Platform or protocol state carried with this packet.
+     bool after_ref_frame_invalidation = false;  ///< Whether the frame follows reference-frame invalidation.
+     std::optional<std::chrono::steady_clock::time_point> frame_timestamp;  ///< Capture timestamp associated with the frame.
++    std::optional<std::chrono::steady_clock::time_point> profile_enqueued;  ///< Optional diagnostic queue timestamp; not sent on the wire.
+   };
+ 
+   /**
+diff --git a/src/video_latency_profile.h b/src/video_latency_profile.h
+new file mode 100644
+index 0000000..db84a84
+--- /dev/null
++++ b/src/video_latency_profile.h
+@@ -0,0 +1,175 @@
++/**
++ * @file src/video_latency_profile.h
++ * @brief Opt-in, bounded CPU-wall stage timing without per-frame logging or allocation.
++ */
++#pragma once
++#include <algorithm>
++#include <array>
++#include <chrono>
++#include <cstdint>
++#include <cstdlib>
++#include <memory>
++#include <sstream>
++#include <string>
++#include <utility>
++
++namespace video_latency {
++  /** @brief Distinct wall-time boundaries; nested spans must not be summed. */
++  enum class stage {
++    kms_refresh,  ///< Metadata/export work, including work before the wire timestamp.
++    import,  ///< EGL source import.
++    rgb_prepare,  ///< Crop and cursor preparation.
++    gl_convert,  ///< GL submission, not GPU completion.
++    map,  ///< GL-to-CUDA map call including any blocking wait.
++    copy_unmap,  ///< CUDA plane-copy submission and unmap call.
++    convert_total,  ///< Total converter CPU wall time, including nested stages.
++    capture_to_consume,  ///< Capture age on encoder consumption.
++    encode_enqueue,  ///< Encoder send/drain and packet enqueue CPU wall time.
++    packet_queue,  ///< Encoded packet enqueue-to-consumer residence.
++    capture_to_broadcast,  ///< Capture age on broadcaster consumption.
++    count  ///< Number of stage identifiers.
++  };
++
++  /** @brief Single-owner timing accumulator. Disabled mode reads no clocks and allocates nothing. */
++  class profile_t {
++  public:
++    using clock = std::chrono::steady_clock;  ///< Shared monotonic clock domain.
++
++    /** @brief Read the opt-in switch once, at profile construction. */
++    static bool requested() {
++      auto value = std::getenv("SUNSHINE_PROFILE_VIDEO");
++      return value != nullptr && value[0] == '1' && value[1] == '\0';
++    }
++
++    /** @brief Construct an optionally enabled profile. @param enabled Allocate bounded timing storage if true. */
++    explicit profile_t(bool enabled = requested()):
++        data(enabled ? std::make_unique<data_t>() : nullptr) {}
++
++    /** @brief Return whether timing is active. */
++    bool enabled() const {
++      return bool(data);
++    }
++
++    /**
++     * @brief Add one nonnegative wall-time observation.
++     * @param id Stage measured.
++     * @param duration Elapsed time in the shared monotonic clock domain.
++     */
++    void observe(stage id, clock::duration duration) {
++      const auto index = static_cast<std::size_t>(id);
++      if (!data || index >= data->values.size() || duration < clock::duration::zero()) {
++        return;
++      }
++      auto &v = data->values[index];
++      auto ns = std::chrono::duration_cast<std::chrono::nanoseconds>(duration).count();
++      v.recent[v.count % v.recent.size()] = ns;
++      ++v.count;
++      v.total_ns += ns;
++      v.maximum_ns = std::max(v.maximum_ns, ns);
++    }
++
++    /** @brief Scoped wall-time measurement; the profile must outlive the scope. */
++    class scope_t {
++    public:
++      /** @brief Start timing if enabled. @param owner Profile owner. @param id Stage measured. */
++      scope_t(profile_t &owner, stage id):
++          profile(owner.enabled() ? &owner : nullptr),
++          id(id),
++          start(owner.enabled() ? clock::now() : clock::time_point {}) {}
++
++      scope_t(const scope_t &) = delete;
++
++      /** @brief Record elapsed wall time even when the operation throws. */
++      ~scope_t() {
++        if (profile) {
++          profile->observe(id, clock::now() - start);
++        }
++      }
++
++    private:
++      profile_t *profile;  ///< Owner, or null when disabled.
++      stage id;  ///< Stage measured.
++      clock::time_point start;  ///< Beginning of the synchronous call.
++    };
++
++    /** @brief Start a scoped measurement. @param id Stage measured. @return Scoped timer. */
++    scope_t scope(stage id) {
++      return scope_t {*this, id};
++    }
++
++    /**
++     * @brief Measure a synchronous call; asynchronous GPU completion is not inferred.
++     * @param id Stage measured.
++     * @param operation Operation to execute exactly once, including when disabled.
++     * @return The operation's unchanged return value.
++     */
++    template<class F>
++    decltype(auto) measure(stage id, F &&operation) {
++      auto timer = scope(id);
++      return std::forward<F>(operation)();
++    }
++
++    /** @brief Return sample count. @param id Stage inspected. */
++    std::uint64_t count(stage id) const {
++      auto index = static_cast<std::size_t>(id);
++      return data && index < data->values.size() ? data->values[index].count : 0;
++    }
++
++    /**
++     * @brief Format at teardown, outside the per-frame path. Quantiles cover the latest 512 samples.
++     * @param backend Constant backend label supplied by the caller.
++     * @return CPU-wall timing summary; empty when disabled or no samples exist.
++     */
++    std::string report(const char *backend) const {
++      if (!data) {
++        return {};
++      }
++      std::ostringstream out;
++      out << "Video CPU-wall profile backend=" << backend << " (nested spans; quantiles=last512; us):";
++      bool any = false;
++      for (std::size_t i = 0; i < data->values.size(); ++i) {
++        const auto &v = data->values[i];
++        if (!v.count) {
++          continue;
++        }
++        any = true;
++        auto copy = v.recent;
++        auto n = std::min<std::uint64_t>(v.count, copy.size());
++        std::sort(copy.begin(), copy.begin() + n);
++        out << ' ' << names[i] << "{n=" << v.count << ",avg=" << v.total_ns / v.count / 1000
++            << ",p50=" << copy[n / 2] / 1000. << ",p95=" << copy[n * 95 / 100] / 1000.
++            << ",p99=" << copy[n * 99 / 100] / 1000. << ",max=" << v.maximum_ns / 1000. << '}';
++      }
++      return any ? out.str() : std::string {};
++    }
++
++  private:
++    /** @brief Fixed-size recent sample ring with whole-session aggregate statistics. */
++    struct values_t {
++      std::array<std::int64_t, 512> recent {};  ///< Recent wall times in ns.
++      std::uint64_t count = 0;  ///< Whole-session sample count.
++      long double total_ns = 0;  ///< Aggregate time without integer-sum overflow.
++      std::int64_t maximum_ns = 0;  ///< Whole-session maximum.
++    };
++
++    /** @brief Storage allocated once only when explicitly enabled. */
++    struct data_t {
++      std::array<values_t, static_cast<std::size_t>(stage::count)> values;  ///< Per-stage sample storage.
++    };
++
++    std::unique_ptr<data_t> data;  ///< Single-thread-owned optional storage.
++    inline static constexpr std::array<const char *, static_cast<std::size_t>(stage::count)> names {
++      "kms_refresh",
++      "egl_import",
++      "rgb_prepare",
++      "gl_submit",
++      "cuda_map",
++      "cuda_copy_unmap",
++      "convert_total",
++      "capture_to_consume",
++      "encode_enqueue",
++      "packet_queue",
++      "capture_to_broadcast"
++    };  ///< Stable stage labels.
++  };
++}  // namespace video_latency
+diff --git a/tests/unit/test_video_latency_profile.cpp b/tests/unit/test_video_latency_profile.cpp
+new file mode 100644
+index 0000000..10d331c
+--- /dev/null
++++ b/tests/unit/test_video_latency_profile.cpp
+@@ -0,0 +1,61 @@
++/**
++ * @file tests/unit/test_video_latency_profile.cpp
++ * @brief Verify opt-in timing boundaries, bounded reporting, and exception behavior.
++ */
++#include <gtest/gtest.h>
++#include <src/video_latency_profile.h>
++#include <stdexcept>
++
++TEST(VideoLatencyProfile, DisabledStillExecutesOperationsAndCollectsNothing) {
++  video_latency::profile_t profile(false);
++  int calls = 0;
++  EXPECT_EQ(profile.measure(video_latency::stage::map, [&] {
++    ++calls;
++    return 7;
++  }),
++            7);
++  profile.observe(video_latency::stage::map, std::chrono::seconds(1));
++  EXPECT_EQ(calls, 1);
++  EXPECT_FALSE(profile.enabled());
++  EXPECT_EQ(profile.count(video_latency::stage::map), 0);
++  EXPECT_TRUE(profile.report("test").empty());
++}
++
++TEST(VideoLatencyProfile, RecentQuantilesAndWholeSessionMeanHaveExplicitBoundaries) {
++  video_latency::profile_t profile(true);
++  for (int i = 0; i < 1024; ++i) {
++    profile.observe(video_latency::stage::map, std::chrono::microseconds(i));
++  }
++  auto report = profile.report("test");
++  EXPECT_EQ(profile.count(video_latency::stage::map), 1024);
++  EXPECT_NE(report.find("avg=511.5"), std::string::npos);
++  EXPECT_NE(report.find("p50=768"), std::string::npos);
++  EXPECT_NE(report.find("p95=998"), std::string::npos);
++  EXPECT_NE(report.find("max=1023"), std::string::npos);
++}
++
++TEST(VideoLatencyProfile, InvalidAndNegativeSamplesAreIgnored) {
++  video_latency::profile_t profile(true);
++  profile.observe(video_latency::stage::count, std::chrono::seconds(1));
++  profile.observe(video_latency::stage::map, -std::chrono::seconds(1));
++  EXPECT_EQ(profile.count(video_latency::stage::count), 0);
++  EXPECT_TRUE(profile.report("test").empty());
++}
++
++TEST(VideoLatencyProfile, RecordsExceptionsAndPreservesReferenceAndVoidReturns) {
++  video_latency::profile_t profile(true);
++  int value = 3;
++  int &reference = profile.measure(video_latency::stage::map, [&]() -> int & {
++    return value;
++  });
++  EXPECT_EQ(&reference, &value);
++  profile.measure(video_latency::stage::map, [&] {
++    value = 4;
++  });
++  EXPECT_EQ(value, 4);
++  EXPECT_THROW(profile.measure(video_latency::stage::map, []() -> int {
++    throw std::runtime_error("test");
++  }),
++               std::runtime_error);
++  EXPECT_EQ(profile.count(video_latency::stage::map), 3);
++}

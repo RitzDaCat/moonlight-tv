@@ -1,0 +1,355 @@
+--- a/src/stream.cpp
++++ b/src/stream.cpp
+@@ -5,6 +5,7 @@
+ 
+ // standard includes
+ #include <cstring>
++#include <cstdlib>
+ #include <fstream>
+ #include <future>
+ #include <optional>
+@@ -26,6 +27,7 @@
+ #include "config.h"
+ #include "display_device.h"
+ #include "fec_encoder_cache.h"
++#include "fec_gfni.h"
+ #include "globals.h"
+ #include "input.h"
+ #include "logging.h"
+@@ -849,7 +851,18 @@
+       }
+     };
+ 
+-    static fec_t encode(rs_cache_t &cache, const std::string_view &payload, size_t blocksize, size_t fecpercentage, size_t minparityshards, size_t prefixsize) {
++    /**
++     * @brief Assemble a padded FEC block with bit-identical optional register-blocked parity.
++     * @param cache Sender-owned coefficient matrix cache.
++     * @param payload Serialized video data to protect.
++     * @param blocksize Bytes per data/parity shard.
++     * @param fecpercentage Requested parity percentage.
++     * @param minparityshards Minimum parity count while FEC is enabled.
++     * @param prefixsize Reserved per-shard encryption header bytes.
++     * @param use_gfni Explicit opt-in to the optional parity kernel, with CPU fallback.
++     * @return Serialized shards and packet metadata.
++     */
++    static fec_t encode(rs_cache_t &cache, const std::string_view &payload, size_t blocksize, size_t fecpercentage, size_t minparityshards, size_t prefixsize, bool use_gfni = false) {
+       auto payload_size = payload.size();
+ 
+       auto pad = payload_size % blocksize != 0;
+@@ -910,7 +923,11 @@
+ 
+         // packets = parity_shards + data_shards
+         auto *rs = cache.get((int) data_shards, (int) parity_shards);
+-        reed_solomon_encode(rs, shards_p.begin(), (int) nr_shards, (int) blocksize);
++        auto status = use_gfni ? gfni::encode(rs, shards_p.begin(), (int) nr_shards, (int) blocksize) :
++                                 reed_solomon_encode(rs, shards_p.begin(), (int) nr_shards, (int) blocksize);
++        if (status != 0) {
++          throw std::runtime_error("Video FEC parity generation failed");
++        }
+       }
+ 
+       return {
+@@ -1544,6 +1561,13 @@
+     crypto::aes_t iv(12);
+ 
+     fec::rs_cache_t fec_encoders;
++    const bool gfni_fec = []() {
++      const char *option = std::getenv("SUNSHINE_GFNI_FEC");
++      return option && std::string_view(option) == "1";
++    }();
++    if (gfni_fec) {
++      BOOST_LOG(info) << "Register-blocked video FEC enabled; GFNI available=" << fec::gfni::available();
++    }
+     video_latency::profile_t profile;
+     auto report_profile = util::fail_guard([&]() {
+       if (profile.enabled()) {
+@@ -1729,7 +1753,9 @@
+ 
+           frame_fec_latency_logger.first_point_now();
+           // If video encryption is enabled, we allocate space for the encryption header before each shard
+-          auto shards = fec::encode(fec_encoders, current_payload, blocksize, fecPercentage, session->config.minRequiredFecPackets, session->video.cipher ? sizeof(video_packet_enc_prefix_t) : 0);
++          auto shards = profile.measure(video_latency::stage::fec_prepare, [&]() {
++            return fec::encode(fec_encoders, current_payload, blocksize, fecPercentage, session->config.minRequiredFecPackets, session->video.cipher ? sizeof(video_packet_enc_prefix_t) : 0, gfni_fec);
++          });
+           frame_fec_latency_logger.second_point_now_and_log();
+ 
+           auto peer_address = session->video.peer.address();
+--- a/src/video_latency_profile.h
++++ b/src/video_latency_profile.h
+@@ -27,6 +27,7 @@
+     encode_enqueue,  ///< Encoder send/drain and packet enqueue CPU wall time.
+     packet_queue,  ///< Encoded packet enqueue-to-consumer residence.
+     capture_to_broadcast,  ///< Capture age on broadcaster consumption.
++    fec_prepare,  ///< Sender FEC allocation, padding, matrix lookup and parity generation.
+     count  ///< Number of stage identifiers.
+   };
+ 
+@@ -169,7 +170,8 @@
+       "capture_to_consume",
+       "encode_enqueue",
+       "packet_queue",
+-      "capture_to_broadcast"
++      "capture_to_broadcast",
++      "fec_prepare"
+     };  ///< Stable stage labels.
+   };
+ }  // namespace video_latency
+--- /dev/null
++++ b/src/fec_gfni.h
+@@ -0,0 +1,136 @@
++// SPDX-License-Identifier: GPL-3.0-only
++/**
++ * @file src/fec_gfni.h
++ * @brief Experimental register-blocked GF(256) parity, compatible with nanors matrices.
++ */
++#pragma once
++#include <algorithm>
++#include <cstdint>
++#include <rs.h>
++#if defined(__x86_64__) || defined(__i386__)
++  #include <gf2_8_affine_mat.h>
++  #include <immintrin.h>
++#endif
++
++namespace stream::fec::gfni {
++  /** @brief Query every feature required by the optional 512-bit GFNI implementation. */
++  inline bool available() {
++#if (defined(__x86_64__) || defined(__i386__)) && (defined(__GNUC__) || defined(__clang__))
++    static const bool supported = [] {
++      __builtin_cpu_init();
++      return __builtin_cpu_supports("avx512f") && __builtin_cpu_supports("avx512bw") && __builtin_cpu_supports("gfni");
++    }();
++    return supported;
++#else
++    return false;
++#endif
++  }
++#if (defined(__x86_64__) || defined(__i386__)) && (defined(__GNUC__) || defined(__clang__))
++  /**
++   * @brief Accumulate a parity-by-byte tile in registers instead of repeatedly storing partial parity.
++   * @tparam Rows Number of independent parity rows.
++   * @tparam Chunks Number of contiguous 64-byte vectors per row.
++   * @param rs Immutable nanors GF(256) coefficient matrix.
++   * @param shards Input data followed by output parity pointers, as in nanors.
++   * @param row First output parity row.
++   * @param offset Byte offset into every shard.
++   * @param tail Valid bytes for the one-vector tail; full tiles pass 64.
++   */
++  template<unsigned Rows, unsigned Chunks>
++  __attribute__((target("avx512f,avx512bw,gfni"))) inline void tile(const reed_solomon *rs, unsigned char **shards, unsigned row, unsigned offset, unsigned tail = 64) {
++    __m512i accum[Rows][Chunks];
++    const __mmask64 mask = tail == 64 ? ~__mmask64(0) : (__mmask64(1) << tail) - 1;
++    for (unsigned p = 0; p < Rows; ++p) {
++      for (unsigned c = 0; c < Chunks; ++c) {
++        accum[p][c] = _mm512_setzero_si512();
++      }
++    }
++    for (int input = 0; input < rs->ds; ++input) {
++      __m512i value[Chunks];
++      for (unsigned c = 0; c < Chunks; ++c) {
++        value[c] = _mm512_maskz_loadu_epi8(mask, shards[input] + offset + c * 64);
++      }
++      for (unsigned p = 0; p < Rows; ++p) {
++        const auto coefficient = rs->p[(row + p) * rs->ds + input];
++        const auto matrix = _mm512_set1_epi64(GF2_8_AFFINE_MAT[coefficient]);
++        for (unsigned c = 0; c < Chunks; ++c) {
++          accum[p][c] = _mm512_xor_si512(accum[p][c], _mm512_gf2p8affine_epi64_epi8(value[c], matrix, 0));
++        }
++      }
++    }
++    for (unsigned p = 0; p < Rows; ++p) {
++      for (unsigned c = 0; c < Chunks; ++c) {
++        _mm512_mask_storeu_epi8(shards[rs->ds + row + p] + offset + c * 64, mask, accum[p][c]);
++      }
++    }
++  }
++
++  /**
++   * @brief Cover a shard's full bytes and masked tail for a fixed parity group.
++   * @tparam Rows Independent parity rows retained in registers.
++   * @param rs Encoder coefficient matrix.
++   * @param shards Input/output shard pointers.
++   * @param row First output parity row.
++   * @param bytes Exact unpadded bytes per shard.
++   */
++  template<unsigned Rows>
++  __attribute__((target("avx512f,avx512bw,gfni"))) inline void rows(const reed_solomon *rs, unsigned char **shards, unsigned row, unsigned bytes) {
++    unsigned offset = 0;
++    for (; bytes - offset >= 256; offset += 256) {
++      tile<Rows, 4>(rs, shards, row, offset);
++    }
++    for (; bytes - offset >= 64; offset += 64) {
++      tile<Rows, 1>(rs, shards, row, offset);
++    }
++    if (offset != bytes) {
++      tile<Rows, 1>(rs, shards, row, offset, bytes - offset);
++    }
++  }
++
++  /**
++   * @brief Dispatch complete parity groups without function-pointer calls per data/parity pair.
++   * @param rs Encoder coefficient matrix.
++   * @param shards Input/output shard pointers.
++   * @param bytes Exact unpadded bytes per shard.
++   */
++  __attribute__((target("avx512f,avx512bw,gfni"))) inline void encode_native(const reed_solomon *rs, unsigned char **shards, unsigned bytes) {
++    unsigned row = 0;
++    for (; row + 4 <= unsigned(rs->ps); row += 4) {
++      rows<4>(rs, shards, row, bytes);
++    }
++    if (row + 2 <= unsigned(rs->ps)) {
++      rows<2>(rs, shards, row, bytes);
++      row += 2;
++    }
++    if (row < unsigned(rs->ps)) {
++      rows<1>(rs, shards, row, bytes);
++    }
++  }
++#endif
++  /**
++   * @brief Encode exact nanors parity, with a portable fallback on unsupported CPUs.
++   * @param rs Initialized coefficient matrix.
++   * @param shards Nonoverlapping data then parity pointers, with at least bytes readable/writable.
++   * @param count Number of provided shard pointers.
++   * @param bytes Bytes per shard; no padding or alignment is required.
++   * @param permit_native Allow the optional vector kernel; false exercises the portable fallback.
++   * @return Zero on success, negative on malformed dimensions or null shard pointers.
++   */
++  inline int encode(reed_solomon *rs, unsigned char **shards, int count, int bytes, bool permit_native = true) {
++    if (!rs || !shards || rs->ds <= 0 || rs->ds > DATA_SHARDS_MAX || rs->ps <= 0 || rs->ps > DATA_SHARDS_MAX || rs->ts != rs->ds + rs->ps || rs->ts > DATA_SHARDS_MAX || count < rs->ts || bytes <= 0) {
++      return -1;
++    }
++    for (int i = 0; i < rs->ts; ++i) {
++      if (!shards[i]) {
++        return -1;
++      }
++    }
++#if (defined(__x86_64__) || defined(__i386__)) && (defined(__GNUC__) || defined(__clang__))
++    if (permit_native && available()) {
++      encode_native(rs, shards, unsigned(bytes));
++      return 0;
++    }
++#endif
++    return reed_solomon_encode(rs, shards, count, bytes);
++  }
++}  // namespace stream::fec::gfni
+--- /dev/null
++++ b/tests/unit/test_fec_gfni.cpp
+@@ -0,0 +1,117 @@
++/**
++ * @file tests/unit/test_fec_gfni.cpp
++ * @brief Independent GF polynomial oracle, byte guards and native-client-compatible recovery.
++ */
++#include "src/fec_encoder_cache.h"
++#include "src/fec_gfni.h"
++
++#include <array>
++#include <climits>
++#include <cstring>
++#include <gtest/gtest.h>
++#include <random>
++
++/** @brief Reference GF(256) polynomial multiply, independent of all affine lookup tables. */
++static unsigned char polynomial_product(unsigned a, unsigned b) {
++  unsigned product = 0;
++  for (unsigned bit = 0; bit < 8; ++bit) {
++    if (b & 1) {
++      product ^= a;
++    }
++    b >>= 1;
++    a <<= 1;
++    if (a & 256) {
++      a ^= 0x11d;
++    }
++  }
++  return static_cast<unsigned char>(product);
++}
++
++/** @brief Exhaust every coefficient and byte, including zero and identity transforms. */
++TEST(FecGfni, MatchesEveryPolynomialProduct) {
++  reed_solomon_init();
++  std::unique_ptr<reed_solomon, stream::fec::rs_deleter_t> rs {reed_solomon_new(1, 1)};
++  ASSERT_TRUE(rs);
++  std::array<unsigned char, 256> input {}, output {};
++  for (unsigned i = 0; i < 256; ++i) {
++    input[i] = i;
++  }
++  unsigned char *shards[] {input.data(), output.data()};
++  for (unsigned coefficient = 0; coefficient < 256; ++coefficient) {
++    rs->p[0] = coefficient;
++    ASSERT_EQ(stream::fec::gfni::encode(rs.get(), shards, 2, input.size()), 0);
++    for (unsigned x = 0; x < 256; ++x) {
++      ASSERT_EQ(output[x], polynomial_product(coefficient, x));
++    }
++  }
++}
++
++/** @brief Validate all public inputs before entering any vector or portable data path. */
++TEST(FecGfni, RejectsMalformedDimensionsAndPointers) {
++  reed_solomon_init();
++  std::unique_ptr<reed_solomon, stream::fec::rs_deleter_t> rs {reed_solomon_new(1, 1)};
++  ASSERT_TRUE(rs);
++  unsigned char input = 23, output = 0xcd;
++  unsigned char *shards[] {&input, &output};
++  EXPECT_LT(stream::fec::gfni::encode(nullptr, shards, 2, 1), 0);
++  EXPECT_LT(stream::fec::gfni::encode(rs.get(), nullptr, 2, 1), 0);
++  EXPECT_LT(stream::fec::gfni::encode(rs.get(), shards, 1, 1), 0);
++  EXPECT_LT(stream::fec::gfni::encode(rs.get(), shards, 2, 0), 0);
++  EXPECT_LT(stream::fec::gfni::encode(rs.get(), shards, 2, -1), 0);
++  shards[1] = nullptr;
++  EXPECT_LT(stream::fec::gfni::encode(rs.get(), shards, 2, 1), 0);
++  shards[1] = &output;
++  rs->ds = INT_MAX;
++  EXPECT_LT(stream::fec::gfni::encode(rs.get(), shards, 2, 1), 0);
++  rs->ds = 1;
++  rs->ps = INT_MAX;
++  EXPECT_LT(stream::fec::gfni::encode(rs.get(), shards, 2, 1), 0);
++  rs->ps = 1;
++  rs->ts = 1;
++  EXPECT_LT(stream::fec::gfni::encode(rs.get(), shards, 2, 1), 0);
++  EXPECT_EQ(output, 0xcd);
++}
++
++/** @brief Compare complete buffers, tails and erasure recovery against the unchanged client codec. */
++TEST(FecGfni, PreservesParityGuardsAndRecoveryWithPortableFallback) {
++  reed_solomon_init();
++  std::mt19937 random(0x40901344);
++  for (auto [data, parity] : {std::pair {1, 1}, {8, 2}, {32, 7}, {128, 26}, {200, 40}, {127, 128}, {254, 1}, {1, 254}}) {
++    std::unique_ptr<reed_solomon, stream::fec::rs_deleter_t> rs {reed_solomon_new(data, parity)};
++    ASSERT_TRUE(rs);
++    for (int bytes : {1, 3, 15, 31, 63, 64, 65, 127, 255, 256, 257, 1344, 1408, 9001}) {
++      for (bool native : {false, true}) {
++        constexpr unsigned guard = 67;
++        std::vector<std::vector<unsigned char>> expected(data + parity), actual(data + parity);
++        std::vector<unsigned char *> reference(data + parity), candidate(data + parity);
++        for (int i = 0; i < data + parity; ++i) {
++          expected[i].assign(bytes + guard * 2 + 3, 0xcd);
++          for (int x = 0; x < bytes; ++x) {
++            expected[i][guard + i % 4 + x] = random() & 255;
++          }
++          actual[i] = expected[i];
++          reference[i] = expected[i].data() + guard + i % 4;
++          candidate[i] = actual[i].data() + guard + i % 4;
++        }
++        ASSERT_EQ(reed_solomon_encode(rs.get(), reference.data(), data + parity, bytes), 0);
++        ASSERT_EQ(stream::fec::gfni::encode(rs.get(), candidate.data(), data + parity, bytes, native), 0);
++        ASSERT_EQ(expected, actual);
++        auto saved = actual;
++        std::vector<unsigned char> erased(data + parity, 0);
++        const int lost = std::min(data, std::max(1, parity / 2));
++        for (int i = 0; i < lost; ++i) {
++          erased[i] = 1;
++          std::memset(candidate[i], 0, bytes);
++        }
++        if (lost < parity) {
++          erased.back() = 1;
++          std::memset(candidate.back(), 0, bytes);
++        }
++        ASSERT_EQ(reed_solomon_decode(rs.get(), candidate.data(), erased.data(), data + parity, bytes), 0);
++        for (int i = 0; i < data; ++i) {
++          ASSERT_EQ(saved[i], actual[i]);
++        }
++      }
++    }
++  }
++}

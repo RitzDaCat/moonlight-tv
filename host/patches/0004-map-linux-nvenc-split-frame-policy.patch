@@ -1,0 +1,112 @@
+diff --git a/src/config.cpp b/src/config.cpp
+index 349386e..bf1ae57 100644
+--- a/src/config.cpp
++++ b/src/config.cpp
+@@ -1620,6 +1620,7 @@ namespace config {
+ 
+ #if !defined(__ANDROID__) && !defined(__APPLE__)
+     video.nv_legacy.preset = "p" + std::to_string(video.nv.quality_preset);
++    video.nv_legacy.split_encode = nvenc::ffmpeg_split_encode_mode(video.nv.split_frame_encoding);
+     video.nv_legacy.multipass = video.nv.two_pass == nvenc::nvenc_two_pass::quarter_resolution ? NV_ENC_TWO_PASS_QUARTER_RESOLUTION :
+                                 video.nv.two_pass == nvenc::nvenc_two_pass::full_resolution    ? NV_ENC_TWO_PASS_FULL_RESOLUTION :
+                                                                                                  NV_ENC_MULTI_PASS_DISABLED;
+diff --git a/src/config.h b/src/config.h
+index f8ebc31..3c068c1 100644
+--- a/src/config.h
++++ b/src/config.h
+@@ -74,6 +74,7 @@ namespace config {
+ 
+     struct {
+       std::string preset;  ///< FFmpeg NVENC preset name, independent of its numeric enum values.
++      std::string split_encode;  ///< FFmpeg split-frame mode for HEVC and AV1.
+       int multipass;  ///< Legacy NVENC multipass mode.
+       int h264_coder;  ///< Legacy NVENC H.264 entropy-coding mode.
+       int aq;  ///< Legacy NVENC adaptive-quantization mode.
+diff --git a/src/nvenc/nvenc_config.h b/src/nvenc/nvenc_config.h
+index 3ae2276..0befea5 100644
+--- a/src/nvenc/nvenc_config.h
++++ b/src/nvenc/nvenc_config.h
+@@ -24,6 +24,22 @@ namespace nvenc {
+     force_enabled,  ///< Force-enable
+   };
+ 
++  /**
++   * @brief Translate the public split-frame setting to a stable FFmpeg option name.
++   * @param mode Requested split-frame policy.
++   * @return Named FFmpeg split_encode_mode value; unknown values retain auto mode.
++   */
++  constexpr const char *ffmpeg_split_encode_mode(nvenc_split_frame_encoding mode) {
++    switch (mode) {
++      case nvenc_split_frame_encoding::disabled:
++        return "disabled";
++      case nvenc_split_frame_encoding::force_enabled:
++        return "forced";
++      default:
++        return "auto";
++    }
++  }
++
+   /**
+    * @brief NVENC encoder configuration.
+    */
+diff --git a/src/video.cpp b/src/video.cpp
+index 6e99ada..9f860d4 100644
+--- a/src/video.cpp
++++ b/src/video.cpp
+@@ -787,6 +787,7 @@ namespace video {
+         {"rc"s, NV_ENC_PARAMS_RC_CBR},
+         {"multipass"s, &config::video.nv_legacy.multipass},
+         {"aq"s, &config::video.nv_legacy.aq},
++        {"split_encode_mode"s, &config::video.nv_legacy.split_encode},
+       },
+       {},  // SDR-specific options
+       {},  // HDR-specific options
+@@ -808,6 +809,7 @@ namespace video {
+         {"rc"s, NV_ENC_PARAMS_RC_CBR},
+         {"multipass"s, &config::video.nv_legacy.multipass},
+         {"aq"s, &config::video.nv_legacy.aq},
++        {"split_encode_mode"s, &config::video.nv_legacy.split_encode},
+       },
+       {
+         // SDR-specific options
+diff --git a/tests/unit/test_nvenc_split_mode.cpp b/tests/unit/test_nvenc_split_mode.cpp
+new file mode 100644
+index 0000000..e519249
+--- /dev/null
++++ b/tests/unit/test_nvenc_split_mode.cpp
+@@ -0,0 +1,35 @@
++/**
++ * @file tests/unit/test_nvenc_split_mode.cpp
++ * @brief Check split-frame policy names against the linked HEVC/AV1 encoders.
++ */
++#if !defined(__ANDROID__) && !defined(__APPLE__)
++  #include <gtest/gtest.h>
++  #include <src/nvenc/nvenc_config.h>
++extern "C" {
++  #include <libavcodec/avcodec.h>
++  #include <libavutil/opt.h>
++}
++
++TEST(NvencSplitMode, MapsPublicPolicyWithoutDependingOnFFmpegEnumNumbers) {
++  using enum nvenc::nvenc_split_frame_encoding;
++  EXPECT_STREQ(nvenc::ffmpeg_split_encode_mode(disabled), "disabled");
++  EXPECT_STREQ(nvenc::ffmpeg_split_encode_mode(driver_decides), "auto");
++  EXPECT_STREQ(nvenc::ffmpeg_split_encode_mode(force_enabled), "forced");
++  EXPECT_STREQ(nvenc::ffmpeg_split_encode_mode(static_cast<nvenc::nvenc_split_frame_encoding>(-1)), "auto");
++}
++
++TEST(NvencSplitMode, EveryModeResolvesForBothSupportedCodecs) {
++  for (const auto name : {"hevc_nvenc", "av1_nvenc"}) {
++    const AVCodec *codec = avcodec_find_encoder_by_name(name);
++    if (codec == nullptr) {
++      GTEST_SKIP() << name << " is not available";
++    }
++    AVCodecContext *context = avcodec_alloc_context3(codec);
++    ASSERT_NE(context, nullptr);
++    for (const auto mode : {nvenc::nvenc_split_frame_encoding::disabled, nvenc::nvenc_split_frame_encoding::driver_decides, nvenc::nvenc_split_frame_encoding::force_enabled}) {
++      EXPECT_EQ(av_opt_set(context->priv_data, "split_encode_mode", nvenc::ffmpeg_split_encode_mode(mode), 0), 0) << name;
++    }
++    avcodec_free_context(&context);
++  }
++}
++#endif

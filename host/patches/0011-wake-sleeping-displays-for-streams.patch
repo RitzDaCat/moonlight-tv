@@ -1,0 +1,1052 @@
+--- a/cmake/compile_definitions/linux.cmake
++++ b/cmake/compile_definitions/linux.cmake
+@@ -216,6 +216,7 @@ if(WAYLAND_FOUND)
+     GEN_WAYLAND("${WAYLAND_PROTOCOLS_DIR}" "unstable/xdg-output" xdg-output-unstable-v1)
+     GEN_WAYLAND("${WAYLAND_PROTOCOLS_DIR}" "unstable/linux-dmabuf" linux-dmabuf-unstable-v1)
+     GEN_WAYLAND("${CMAKE_SOURCE_DIR}/third-party/wlr-protocols" "unstable" wlr-screencopy-unstable-v1)
++    GEN_WAYLAND("${CMAKE_SOURCE_DIR}/third-party/plasma-wayland-protocols/src/protocols" "" dpms)
+ 
+     include_directories(
+             SYSTEM
+--- a/src/nvhttp.cpp
++++ b/src/nvhttp.cpp
+@@ -1331,6 +1331,9 @@ namespace nvhttp {
+       // The display should be restored in case something fails as there are no other sessions.
+       revert_display_configuration = true;
+ 
++      // Displays that went to sleep can't be configured or captured
++      platf::wake_displays();
++
+       // We want to prepare display only if there are no active sessions at
+       // the moment. This should be done before probing encoders as it could
+       // change the active displays.
+@@ -1443,6 +1446,9 @@ namespace nvhttp {
+     const auto launch_session = make_launch_session(host_audio, args);
+ 
+     if (no_active_sessions) {
++      // Displays that went to sleep can't be configured or captured
++      platf::wake_displays();
++
+       // We want to prepare display only if there are no active sessions at
+       // the moment. This should be done before probing encoders as it could
+       // change the active displays.
+--- a/src/platform/common.h
++++ b/src/platform/common.h
+@@ -934,6 +934,18 @@ namespace platf {
+    */
+   bool needs_encoder_reenumeration();
+ 
++  /**
++   * @brief Turn on displays that are powered off, so a new stream can capture them.
++   */
++  void wake_displays();
++
++  /**
++   * @brief Keep the desktop from dimming or powering off the displays.
++   * @details Controller input does not count as user activity for the desktop's idle timer.
++   * @return Handle that ends the hold when destroyed, or nullptr if no hold was taken.
++   */
++  [[nodiscard]] std::unique_ptr<deinit_t> keep_displays_awake();
++
+   /**
+    * @brief Launch a configured preparation or application command.
+    *
+--- a/src/platform/linux/misc.cpp
++++ b/src/platform/linux/misc.cpp
+@@ -63,6 +63,7 @@
+ #include "src/logging.h"
+ #include "src/platform/common.h"
+ #include "vaapi.h"
++#include "wayland.h"
+ 
+ #ifdef __GNUC__
+   #define SUNSHINE_GNUC_EXTENSION __extension__
+@@ -1205,10 +1206,57 @@ namespace platf {
+   }
+ #endif
+ 
++  /**
++   * @brief Find the capture methods that can capture a display now.
++   * @details KMS and the Wayland methods only find displays that are turned on.
++   * @return `true` if a capture method was found.
++   */
++  bool detect_sources() {
++#ifdef SUNSHINE_BUILD_CUDA
++    if (((config::video.capture.empty() && sources.none()) || config::video.capture == "nvfbc") && verify_nvfbc()) {
++      sources[source::NVFBC] = true;
++    }
++#endif
++#ifdef SUNSHINE_BUILD_WAYLAND
++    if (((config::video.capture.empty() && sources.none()) || config::video.capture == "wlr") && verify_wl()) {
++      sources[source::WAYLAND] = true;
++    }
++#endif
++#ifdef SUNSHINE_BUILD_DRM
++    if (((config::video.capture.empty() && sources.none()) || config::video.capture == "kms") && verify_kms()) {
++      sources[source::KMS] = true;
++    }
++#endif
++#ifdef SUNSHINE_BUILD_X11
++    // We enumerate this capture backend regardless of other suitable sources,
++    // since it may be needed as a NvFBC fallback for software encoding on X11.
++    if ((config::video.capture.empty() || config::video.capture == "x11") && verify_x11()) {
++      sources[source::X11] = true;
++    }
++#endif
++#ifdef SUNSHINE_BUILD_PORTAL
++    if ((config::video.capture.empty() || config::video.capture == "portal") && verify_portal()) {
++      sources[source::PORTAL] = true;
++    }
++#endif
++#ifdef SUNSHINE_BUILD_KWIN
++    if (((config::video.capture.empty() && sources.none()) || config::video.capture == "kwin") && verify_kwin()) {
++      sources[source::KWIN] = true;
++    }
++#endif
++
++    return sources.any();
++  }
++
+   /**
+    * @brief List display names accepted by the selected capture backend.
+    */
+   std::vector<std::string> display_names(mem_type_e hwdevice_type) {
++    // Sunshine may have started while the displays were off
++    if (sources.none() && !detect_sources()) {
++      return {};
++    }
++
+ #ifdef SUNSHINE_BUILD_CUDA
+     // display using NvFBC only supports mem_type_e::cuda
+     if (sources[source::NVFBC] && hwdevice_type == mem_type_e::cuda) {
+@@ -1261,7 +1309,115 @@ namespace platf {
+     return true;
+   }
+ 
++  /**
++   * @brief Turn on displays that are powered off.
++   */
++  void wake_displays() {
++    if (window_system == window_system_e::WAYLAND) {
++      wl::wake_outputs();
++    }
++  }
++
++  namespace {
++    /**
++     * @brief Session bus ScreenSaver inhibition, released on destruction.
++     */
++    class screensaver_inhibit_t: public deinit_t {
++    public:
++      /**
++       * @brief Take over an inhibition.
++       *
++       * @param conn Connection that made the inhibition.
++       * @param cookie Cookie returned by `Inhibit`.
++       */
++      screensaver_inhibit_t(GDBusConnection *conn, std::uint32_t cookie):
++          conn {conn},
++          cookie {cookie} {
++      }
++
++      /**
++       * @brief Release the inhibition.
++       */
++      ~screensaver_inhibit_t() override {
++        g_autoptr(GError) err = nullptr;
++        g_autoptr(GVariant) reply = g_dbus_connection_call_sync(
++          conn,
++          "org.freedesktop.ScreenSaver",
++          "/org/freedesktop/ScreenSaver",
++          "org.freedesktop.ScreenSaver",
++          "UnInhibit",
++          g_variant_new("(u)", cookie),
++          nullptr,
++          G_DBUS_CALL_FLAGS_NONE,
++          -1,
++          nullptr,
++          &err
++        );
++        if (!reply) {
++          BOOST_LOG(warning) << "Couldn't release the display sleep inhibitor: "sv << err->message;
++        }
++        g_object_unref(conn);
++      }
++
++    private:
++      GDBusConnection *conn;  ///< Connection that made the inhibition; closing it ends the inhibition.
++      std::uint32_t cookie;  ///< Cookie returned by `Inhibit`.
++    };
++  }  // namespace
++
++  /**
++   * @brief Inhibit the desktop's screen saver, which also stops it from dimming or powering off displays.
++   *
++   * @return Handle that releases the inhibition, or nullptr if the desktop offers none.
++   */
++  std::unique_ptr<deinit_t> keep_displays_awake() {
++    // A connection of its own, not the shared one: the inhibition ends when this connection closes,
++    // even if releasing it fails, and losing the bus doesn't make Sunshine exit
++    g_autoptr(GError) err = nullptr;
++    g_autofree gchar *address = g_dbus_address_get_for_bus_sync(G_BUS_TYPE_SESSION, nullptr, &err);
++    g_autoptr(GDBusConnection) conn = address ? g_dbus_connection_new_for_address_sync(
++                                                  address,
++                                                  static_cast<GDBusConnectionFlags>(G_DBUS_CONNECTION_FLAGS_AUTHENTICATION_CLIENT | G_DBUS_CONNECTION_FLAGS_MESSAGE_BUS_CONNECTION),
++                                                  nullptr,
++                                                  nullptr,
++                                                  &err
++                                                ) :
++                                                nullptr;
++    if (!conn) {
++      BOOST_LOG(warning) << "Couldn't keep the displays awake: "sv << err->message;
++      return nullptr;
++    }
++
++    g_autoptr(GVariant) reply = g_dbus_connection_call_sync(
++      conn,
++      "org.freedesktop.ScreenSaver",
++      "/org/freedesktop/ScreenSaver",
++      "org.freedesktop.ScreenSaver",
++      "Inhibit",
++      g_variant_new("(ss)", "Sunshine", "Streaming"),
++      G_VARIANT_TYPE("(u)"),
++      G_DBUS_CALL_FLAGS_NONE,
++      -1,
++      nullptr,
++      &err
++    );
++    if (!reply) {
++      BOOST_LOG(warning) << "Couldn't keep the displays awake: "sv << err->message;
++      return nullptr;
++    }
++
++    std::uint32_t cookie;
++    g_variant_get(reply, "(u)", &cookie);
++    return std::make_unique<screensaver_inhibit_t>(static_cast<GDBusConnection *>(g_steal_pointer(&conn)), cookie);
++  }
++
+   std::shared_ptr<display_t> display(mem_type_e hwdevice_type, const std::string &display_name, const video::config_t &config) {
++    // Sunshine may have started while the displays were off.
++    // Return before the CAP_SYS_ADMIN drop below, since KMS needs it.
++    if (sources.none() && !detect_sources()) {
++      return nullptr;
++    }
++
+     // Keep KMS as first element to check before dropping CAP_SYS_ADMIN
+ #ifdef SUNSHINE_BUILD_DRM
+     if (sources[source::KMS]) {
+@@ -1341,42 +1497,8 @@ namespace platf {
+     }
+ #endif
+ 
+-#ifdef SUNSHINE_BUILD_CUDA
+-    if (((config::video.capture.empty() && sources.none()) || config::video.capture == "nvfbc") && verify_nvfbc()) {
+-      sources[source::NVFBC] = true;
+-    }
+-#endif
+-#ifdef SUNSHINE_BUILD_WAYLAND
+-    if (((config::video.capture.empty() && sources.none()) || config::video.capture == "wlr") && verify_wl()) {
+-      sources[source::WAYLAND] = true;
+-    }
+-#endif
+-#ifdef SUNSHINE_BUILD_DRM
+-    if (((config::video.capture.empty() && sources.none()) || config::video.capture == "kms") && verify_kms()) {
+-      sources[source::KMS] = true;
+-    }
+-#endif
+-#ifdef SUNSHINE_BUILD_X11
+-    // We enumerate this capture backend regardless of other suitable sources,
+-    // since it may be needed as a NvFBC fallback for software encoding on X11.
+-    if ((config::video.capture.empty() || config::video.capture == "x11") && verify_x11()) {
+-      sources[source::X11] = true;
+-    }
+-#endif
+-#ifdef SUNSHINE_BUILD_PORTAL
+-    if ((config::video.capture.empty() || config::video.capture == "portal") && verify_portal()) {
+-      sources[source::PORTAL] = true;
+-    }
+-#endif
+-#ifdef SUNSHINE_BUILD_KWIN
+-    if (((config::video.capture.empty() && sources.none()) || config::video.capture == "kwin") && verify_kwin()) {
+-      sources[source::KWIN] = true;
+-    }
+-#endif
+-
+-    if (sources.none()) {
+-      BOOST_LOG(error) << "Unable to initialize capture method"sv;
+-      return nullptr;
++    if (!detect_sources()) {
++      BOOST_LOG(error) << "Unable to initialize capture method, retrying when a stream starts"sv;
+     }
+ 
+     if (!gladLoaderLoadEGL(NULL)) {
+--- a/src/platform/linux/wayland.cpp
++++ b/src/platform/linux/wayland.cpp
+@@ -3,6 +3,7 @@
+  * @brief Definitions for Wayland capture.
+  */
+ // platform includes
++#include <dpms.h>
+ #include <drm_fourcc.h>
+ #include <fcntl.h>
+ #include <gbm.h>
+@@ -586,6 +587,146 @@ namespace wl {
+     return std::move(interface.monitors);
+   }
+ 
++  namespace {
++    /**
++     * @brief Wayland globals used to change output power modes.
++     */
++    struct power_globals_t {
++      std::vector<wl_output *> outputs;  ///< Outputs announced by the compositor.
++      org_kde_kwin_dpms_manager *dpms_manager {nullptr};  ///< KWin DPMS manager, if announced.
++    };
++
++    /**
++     * @brief Power mode reported for one output.
++     */
++    struct output_power_t {
++      org_kde_kwin_dpms *dpms {nullptr};  ///< DPMS object for the output.
++      std::uint32_t supported {0};  ///< Nonzero when the output supports power modes.
++      std::uint32_t mode {ORG_KDE_KWIN_DPMS_MODE_ON};  ///< Last reported power mode.
++    };
++
++    /**
++     * @brief Bind the outputs and the KWin DPMS manager.
++     *
++     * @param data Globals being collected.
++     * @param registry Wayland registry announcing the global.
++     * @param id Global name.
++     * @param interface Interface name of the global.
++     * @param version Interface version of the global.
++     */
++    void add_power_global(void *data, wl_registry *registry, std::uint32_t id, const char *interface, std::uint32_t version) {
++      auto globals = static_cast<power_globals_t *>(data);
++
++      if (!std::strcmp(interface, wl_output_interface.name)) {
++        globals->outputs.push_back(static_cast<wl_output *>(wl_registry_bind(registry, id, &wl_output_interface, 1)));
++      } else if (!std::strcmp(interface, org_kde_kwin_dpms_manager_interface.name)) {
++        globals->dpms_manager = static_cast<org_kde_kwin_dpms_manager *>(wl_registry_bind(registry, id, &org_kde_kwin_dpms_manager_interface, 1));
++      }
++    }
++
++    /**
++     * @brief Ignore removed globals; the connection only lives for one wake.
++     *
++     * @param data Globals being collected.
++     * @param registry Wayland registry announcing the removal.
++     * @param id Global name.
++     */
++    void remove_power_global(void *data, wl_registry *registry, std::uint32_t id) {
++    }
++
++    /**
++     * @brief Record whether an output supports power modes.
++     *
++     * @param data Output power state.
++     * @param dpms DPMS object that sent the event.
++     * @param supported Nonzero when supported.
++     */
++    void dpms_supported(void *data, org_kde_kwin_dpms *dpms, std::uint32_t supported) {
++      static_cast<output_power_t *>(data)->supported = supported;
++    }
++
++    /**
++     * @brief Record the power mode of an output.
++     *
++     * @param data Output power state.
++     * @param dpms DPMS object that sent the event.
++     * @param mode Current power mode.
++     */
++    void dpms_mode(void *data, org_kde_kwin_dpms *dpms, std::uint32_t mode) {
++      static_cast<output_power_t *>(data)->mode = mode;
++    }
++
++    /**
++     * @brief End of a DPMS state update.
++     *
++     * @param data Output power state.
++     * @param dpms DPMS object that sent the event.
++     */
++    void dpms_done(void *data, org_kde_kwin_dpms *dpms) {
++    }
++
++    constexpr wl_registry_listener power_registry_listener {
++      .global = add_power_global,
++      .global_remove = remove_power_global,
++    };  ///< Collects the globals for wake_outputs().
++
++    constexpr org_kde_kwin_dpms_listener dpms_listener {
++      .supported = dpms_supported,
++      .mode = dpms_mode,
++      .done = dpms_done,
++    };  ///< Tracks the power mode of each output.
++  }  // namespace
++
++  void wake_outputs() {
++    display_t display;
++    if (display.init()) {
++      return;
++    }
++
++    power_globals_t globals;
++    auto registry = display.registry();
++    wl_registry_add_listener(registry, &power_registry_listener, &globals);
++    display.roundtrip();
++
++    std::vector<output_power_t> outputs(globals.dpms_manager ? globals.outputs.size() : 0);
++    for (std::size_t x = 0; x < outputs.size(); ++x) {
++      outputs[x].dpms = org_kde_kwin_dpms_manager_get(globals.dpms_manager, globals.outputs[x]);
++      org_kde_kwin_dpms_add_listener(outputs[x].dpms, &dpms_listener, &outputs[x]);
++    }
++    display.roundtrip();
++
++    int woken = 0;
++    for (auto &output : outputs) {
++      if (output.supported && output.mode != ORG_KDE_KWIN_DPMS_MODE_ON) {
++        org_kde_kwin_dpms_set(output.dpms, ORG_KDE_KWIN_DPMS_MODE_ON);
++        ++woken;
++      }
++    }
++
++    if (woken) {
++      BOOST_LOG(info) << "[wayland] Turning on "sv << woken << " display(s)"sv;
++
++      // KWin applies the mode before it answers, and drops unread requests on disconnect
++      display.roundtrip();
++      for (auto &output : outputs) {
++        if (output.supported && output.mode != ORG_KDE_KWIN_DPMS_MODE_ON) {
++          BOOST_LOG(warning) << "[wayland] A display stayed off"sv;
++        }
++      }
++    }
++
++    for (auto &output : outputs) {
++      org_kde_kwin_dpms_release(output.dpms);
++    }
++    if (globals.dpms_manager) {
++      org_kde_kwin_dpms_manager_destroy(globals.dpms_manager);
++    }
++    for (auto output : globals.outputs) {
++      wl_output_destroy(output);
++    }
++    wl_registry_destroy(registry);
++  }
++
+   static bool validate() {
+     display_t display;
+ 
+--- a/src/platform/linux/wayland.h
++++ b/src/platform/linux/wayland.h
+@@ -429,6 +429,12 @@ namespace wl {
+    * @return 0 on success; nonzero or negative platform status on failure.
+    */
+   int init();
++
++  /**
++   * @brief Ask the compositor to turn on outputs that are powered off.
++   * @details Uses KWin's DPMS protocol; other compositors are left alone.
++   */
++  void wake_outputs();
+ }  // namespace wl
+ #else
+ 
+@@ -460,5 +466,8 @@ namespace wl {
+   inline int init() {
+     return -1;
+   }
++
++  inline void wake_outputs() {
++  }
+ }  // namespace wl
+ #endif
+--- a/src/platform/macos/display.mm
++++ b/src/platform/macos/display.mm
+@@ -306,4 +306,20 @@ namespace platf {
+     // We don't track GPU state, so we will always reenumerate. Fortunately, it is fast on macOS.
+     return true;
+   }
++
++  /**
++   * @brief Turn on displays that are powered off.
++   * @details Not implemented on macOS.
++   */
++  void wake_displays() {
++  }
++
++  /**
++   * @brief Keep the displays powered on.
++   * @details Not implemented on macOS.
++   * @return nullptr, because no hold is taken.
++   */
++  std::unique_ptr<deinit_t> keep_displays_awake() {
++    return nullptr;
++  }
+ }  // namespace platf
+--- a/src/platform/windows/display_base.cpp
++++ b/src/platform/windows/display_base.cpp
+@@ -1147,4 +1147,20 @@ namespace platf {
+       return false;
+     }
+   }
++
++  /**
++   * @brief Turn on displays that are powered off.
++   * @details Display initialization already requests the display when it finds no output.
++   */
++  void wake_displays() {
++  }
++
++  /**
++   * @brief Keep the displays powered on.
++   * @details Capture already holds `ES_DISPLAY_REQUIRED` while it runs.
++   * @return nullptr, because no separate hold is needed.
++   */
++  std::unique_ptr<deinit_t> keep_displays_awake() {
++    return nullptr;
++  }
+ }  // namespace platf
+--- a/src/video.cpp
++++ b/src/video.cpp
+@@ -2955,6 +2955,9 @@ namespace video {
+     config_t config,
+     void *channel_data
+   ) {
++    // Controller input doesn't reset the desktop's idle timer
++    auto displays_awake = platf::keep_displays_awake();
++
+     config = resolve_dynamic_range(*chosen_encoder, config);
+ 
+     auto idr_events = mail->event<bool>(mail::idr);
+--- a/tests/CMakeLists.txt
++++ b/tests/CMakeLists.txt
+@@ -91,6 +91,18 @@ if(NOT WIN32)
+     endif()
+ endif()
+ 
++# the Wayland tests play the compositor side of KWin's DPMS protocol
++if(WAYLAND_FOUND)
++    execute_process(
++            COMMAND wayland-scanner server-header
++            "${CMAKE_SOURCE_DIR}/third-party/plasma-wayland-protocols/src/protocols/dpms.xml"
++            "${CMAKE_BINARY_DIR}/generated-src/dpms-server.h"
++            RESULT_VARIABLE WAYLAND_SCANNER_RESULT)
++    if(NOT WAYLAND_SCANNER_RESULT EQUAL 0)
++        message(FATAL_ERROR "wayland-scanner failed")
++    endif()
++endif()
++
+ file(GLOB_RECURSE TEST_SOURCES CONFIGURE_DEPENDS
+         ${CMAKE_SOURCE_DIR}/tests/*.h
+         ${CMAKE_SOURCE_DIR}/tests/*.cpp)
+--- a/tests/tests_common.h
++++ b/tests/tests_common.h
+@@ -18,6 +18,7 @@
+ #endif
+ 
+ // lib includes
++#include <lizardbyte/common/env.h>
+ #include <lizardbyte/common/testing.h>
+ 
+ // local includes
+@@ -99,6 +100,41 @@ namespace test_utils {
+     }
+     return result;
+   }
++
++  /**
++   * @brief Puts an environment variable back the way it was when this object was created.
++   */
++  class env_restore_t {
++  public:
++    /**
++     * @brief Remember the current value of an environment variable.
++     *
++     * @param name Name of the environment variable.
++     */
++    explicit env_restore_t(std::string name):
++        name {std::move(name)},
++        was_set {lizardbyte::common::get_env(this->name, value)} {
++    }
++
++    /**
++     * @brief Restore the remembered value, or unset the variable if it was unset.
++     */
++    ~env_restore_t() {
++      if (was_set) {
++        lizardbyte::common::set_env(name, value);
++      } else {
++        lizardbyte::common::unset_env(name);
++      }
++    }
++
++    env_restore_t(const env_restore_t &) = delete;
++    env_restore_t &operator=(const env_restore_t &) = delete;
++
++  private:
++    std::string name;  ///< Name of the environment variable.
++    std::string value;  ///< Value when this object was created.
++    bool was_set;  ///< Whether the variable was set when this object was created.
++  };
+ }  // namespace test_utils
+ 
+ // Convenience macros for xfail testing
+--- /dev/null
++++ b/tests/unit/platform/linux/test_misc.cpp
+@@ -0,0 +1,246 @@
++/**
++ * @file tests/unit/platform/linux/test_misc.cpp
++ * @brief Test keeping the displays awake through the session bus.
++ */
++// test includes
++#include "../../../tests_common.h"
++
++#if defined(__linux__) || defined(__FreeBSD__)
++  // standard includes
++  #include <atomic>
++  #include <filesystem>
++  #include <fstream>
++  #include <mutex>
++  #include <string>
++  #include <thread>
++  #include <vector>
++
++  // lib includes
++  #include <gio/gio.h>
++
++  // test includes
++  #include "../../../tests_log_checker.h"
++
++namespace {
++  /**
++   * @brief ScreenSaver service on the test session bus, answering calls on its own thread.
++   */
++  class fake_screensaver_t {
++  public:
++    /**
++     * @brief Take the ScreenSaver name on the bus and start answering calls.
++     *
++     * @param address Address of the session bus.
++     * @param release_fails Whether `UnInhibit` returns an error.
++     */
++    fake_screensaver_t(const gchar *address, bool release_fails):
++        release_fails {release_fails} {
++      static constexpr auto introspection =
++        "<node><interface name='org.freedesktop.ScreenSaver'>"
++        "<method name='Inhibit'><arg type='s' direction='in'/><arg type='s' direction='in'/><arg type='u' direction='out'/></method>"
++        "<method name='UnInhibit'><arg type='u' direction='in'/></method>"
++        "</interface></node>";
++      static constexpr GDBusInterfaceVTable vtable {.method_call = handle_method_call};
++
++      node = g_dbus_node_info_new_for_xml(introspection, nullptr);
++      conn = g_dbus_connection_new_for_address_sync(
++        address,
++        static_cast<GDBusConnectionFlags>(G_DBUS_CONNECTION_FLAGS_AUTHENTICATION_CLIENT | G_DBUS_CONNECTION_FLAGS_MESSAGE_BUS_CONNECTION),
++        nullptr,
++        nullptr,
++        nullptr
++      );
++
++      // Calls are answered on the context that is the thread default while registering
++      g_main_context_push_thread_default(context);
++      g_dbus_connection_register_object(conn, "/org/freedesktop/ScreenSaver", node->interfaces[0], &vtable, this, nullptr, nullptr);
++      g_main_context_pop_thread_default(context);
++
++      g_autoptr(GVariant) reply = g_dbus_connection_call_sync(
++        conn,
++        "org.freedesktop.DBus",
++        "/org/freedesktop/DBus",
++        "org.freedesktop.DBus",
++        "RequestName",
++        g_variant_new("(su)", "org.freedesktop.ScreenSaver", 0),
++        G_VARIANT_TYPE("(u)"),
++        G_DBUS_CALL_FLAGS_NONE,
++        -1,
++        nullptr,
++        nullptr
++      );
++
++      thread = std::thread {[this]() {
++        while (running) {
++          g_main_context_iteration(context, TRUE);
++        }
++      }};
++    }
++
++    /**
++     * @brief Stop answering calls and leave the bus.
++     */
++    ~fake_screensaver_t() {
++      running = false;
++      g_main_context_wakeup(context);
++      thread.join();
++
++      g_dbus_connection_close_sync(conn, nullptr, nullptr);
++      g_object_unref(conn);
++      g_main_context_unref(context);
++      g_dbus_node_info_unref(node);
++    }
++
++    fake_screensaver_t(const fake_screensaver_t &) = delete;
++    fake_screensaver_t &operator=(const fake_screensaver_t &) = delete;
++
++    /**
++     * @brief Get the calls answered so far.
++     *
++     * @return Each call with its arguments.
++     */
++    std::vector<std::string> calls() {
++      std::scoped_lock lock {mutex};
++      return calls_answered;
++    }
++
++  private:
++    /**
++     * @brief Answer `Inhibit` with cookie 7 and record each call.
++     *
++     * @param connection Connection the call came in on.
++     * @param sender Unique name of the caller.
++     * @param object_path Object path of the call.
++     * @param interface_name Interface of the call.
++     * @param method_name Method called.
++     * @param parameters Arguments of the call.
++     * @param invocation Invocation to answer.
++     * @param user_data The fake service.
++     */
++    static void handle_method_call(GDBusConnection *connection, const gchar *sender, const gchar *object_path, const gchar *interface_name, const gchar *method_name, GVariant *parameters, GDBusMethodInvocation *invocation, gpointer user_data) {
++      auto self = static_cast<fake_screensaver_t *>(user_data);
++      std::scoped_lock lock {self->mutex};
++
++      if (!g_strcmp0(method_name, "Inhibit")) {
++        const gchar *application;
++        const gchar *reason;
++        g_variant_get(parameters, "(&s&s)", &application, &reason);
++        self->calls_answered.push_back(std::string {"Inhibit "} + application + ", " + reason);
++        g_dbus_method_invocation_return_value(invocation, g_variant_new("(u)", 7));
++        return;
++      }
++
++      std::uint32_t cookie;
++      g_variant_get(parameters, "(u)", &cookie);
++      self->calls_answered.push_back("UnInhibit " + std::to_string(cookie));
++      if (self->release_fails) {
++        g_dbus_method_invocation_return_dbus_error(invocation, "org.freedesktop.DBus.Error.Failed", "Unknown cookie");
++      } else {
++        g_dbus_method_invocation_return_value(invocation, nullptr);
++      }
++    }
++
++    const bool release_fails;  ///< Whether `UnInhibit` returns an error.
++    GMainContext *context {g_main_context_new()};  ///< Context the calls are answered on.
++    GDBusNodeInfo *node;  ///< Introspection data of the service.
++    GDBusConnection *conn;  ///< Connection that owns the ScreenSaver name.
++    std::atomic_bool running {true};  ///< Whether the thread keeps answering calls.
++    std::thread thread;  ///< Thread answering the calls.
++    std::mutex mutex;  ///< Guards calls_answered.
++    std::vector<std::string> calls_answered;  ///< Calls answered so far.
++  };
++
++  /**
++   * @brief Runs each test on a session bus of its own, which has no services to start.
++   */
++  class KeepDisplaysAwakeTest: public ::testing::Test {
++  protected:
++    /**
++     * @brief Start the session bus and point the session bus address at it.
++     */
++    void SetUp() override {
++      g_autofree gchar *daemon = g_find_program_in_path("dbus-daemon");
++      if (!daemon) {
++        GTEST_SKIP() << "dbus-daemon is not installed";
++      }
++
++      g_autofree gchar *tmp = g_dir_make_tmp("sunshine-test-dbus-XXXXXX", nullptr);
++      ASSERT_NE(tmp, nullptr);
++      dir = tmp;
++
++      const auto config = dir / "bus.conf";
++      std::ofstream {config} << "<busconfig><listen>unix:path=" << (dir / "bus").string() << "</listen>"
++                             << "<policy context='default'><allow send_destination='*'/><allow receive_sender='*'/><allow own='*'/></policy></busconfig>";
++
++      const auto config_arg = "--config-file=" + config.string();
++      bus = g_subprocess_new(G_SUBPROCESS_FLAGS_STDOUT_PIPE, nullptr, daemon, "--nofork", "--print-address", config_arg.c_str(), nullptr);
++      ASSERT_NE(bus, nullptr);
++
++      // The bus prints its address once it accepts connections
++      g_autoptr(GDataInputStream) out = g_data_input_stream_new(g_subprocess_get_stdout_pipe(bus));
++      g_autofree gchar *line = g_data_input_stream_read_line(out, nullptr, nullptr, nullptr);
++      ASSERT_NE(line, nullptr);
++      address = line;
++      lizardbyte::common::set_env("DBUS_SESSION_BUS_ADDRESS", address);
++    }
++
++    /**
++     * @brief Stop the session bus and remove its files.
++     */
++    void TearDown() override {
++      if (bus) {
++        stop_bus();
++        g_object_unref(bus);
++      }
++      if (!dir.empty()) {
++        std::filesystem::remove_all(dir);
++      }
++    }
++
++    /**
++     * @brief Stop the session bus.
++     */
++    void stop_bus() {
++      g_subprocess_force_exit(bus);
++      g_subprocess_wait(bus, nullptr, nullptr);
++    }
++
++    test_utils::env_restore_t session_bus {"DBUS_SESSION_BUS_ADDRESS"};  ///< Restores the session bus address.
++    std::filesystem::path dir;  ///< Directory holding the bus config and socket.
++    GSubprocess *bus {nullptr};  ///< Session bus of the test.
++    std::string address;  ///< Address of the session bus.
++  };
++}  // namespace
++
++TEST_F(KeepDisplaysAwakeTest, HoldsInhibitionUntilReleased) {
++  fake_screensaver_t screensaver {address.c_str(), false};
++
++  auto hold = platf::keep_displays_awake();
++  ASSERT_NE(hold, nullptr);
++  EXPECT_EQ(screensaver.calls(), std::vector<std::string> {"Inhibit Sunshine, Streaming"});
++
++  hold.reset();
++  EXPECT_EQ(screensaver.calls(), (std::vector<std::string> {"Inhibit Sunshine, Streaming", "UnInhibit 7"}));
++}
++
++TEST_F(KeepDisplaysAwakeTest, WarnsWhenReleaseFails) {
++  fake_screensaver_t screensaver {address.c_str(), true};
++
++  auto hold = platf::keep_displays_awake();
++  ASSERT_NE(hold, nullptr);
++  hold.reset();
++
++  EXPECT_EQ(screensaver.calls(), (std::vector<std::string> {"Inhibit Sunshine, Streaming", "UnInhibit 7"}));
++  EXPECT_TRUE(log_checker::line_contains("test_sunshine.log", "Couldn't release the display sleep inhibitor"));
++}
++
++TEST_F(KeepDisplaysAwakeTest, NoHoldWithoutScreenSaver) {
++  EXPECT_EQ(platf::keep_displays_awake(), nullptr);
++}
++
++TEST_F(KeepDisplaysAwakeTest, NoHoldWithoutSessionBus) {
++  stop_bus();
++
++  EXPECT_EQ(platf::keep_displays_awake(), nullptr);
++}
++#endif
+--- a/tests/unit/platform/linux/test_wayland.cpp
++++ b/tests/unit/platform/linux/test_wayland.cpp
+@@ -1,10 +1,21 @@
+ /**
+  * @file tests/unit/platform/linux/test_wayland.cpp
+- * @brief Test Wayland output mode selection.
++ * @brief Test Wayland output mode selection and output power control.
+  */
+ #ifdef SUNSHINE_BUILD_WAYLAND
++  // standard includes
++  #include <atomic>
++  #include <filesystem>
++  #include <thread>
++  #include <vector>
++
++  // platform includes
++  #include <dpms-server.h>
++  #include <unistd.h>
++
+   // test includes
+   #include "../../../tests_common.h"
++  #include "../../../tests_log_checker.h"
+ 
+   // local includes
+   #include <src/platform/linux/wayland.h>
+@@ -29,4 +40,183 @@ TEST(WaylandMonitorTest, UpdatesCurrentMode) {
+   EXPECT_EQ(monitor.viewport.width, 2560);
+   EXPECT_EQ(monitor.viewport.height, 1440);
+ }
++
++namespace {
++  /**
++   * @brief Output served by the fake compositor.
++   */
++  struct fake_output_t {
++    bool supported;  ///< Whether the output reports power mode support.
++    std::uint32_t mode;  ///< Current power mode.
++    bool obeys;  ///< Whether the output changes mode when asked.
++    std::vector<std::uint32_t> requests {};  ///< Modes the client asked for.
++  };
++
++  /**
++   * @brief Record a requested power mode and apply it if the output obeys.
++   *
++   * @param client Client that sent the request.
++   * @param resource DPMS object of the output.
++   * @param mode Requested power mode.
++   */
++  void dpms_set(wl_client *client, wl_resource *resource, std::uint32_t mode) {
++    auto output = static_cast<fake_output_t *>(wl_resource_get_user_data(resource));
++    output->requests.push_back(mode);
++    if (output->obeys) {
++      output->mode = mode;
++      org_kde_kwin_dpms_send_mode(resource, mode);
++      org_kde_kwin_dpms_send_done(resource);
++    }
++  }
++
++  /**
++   * @brief Destroy a DPMS object.
++   *
++   * @param client Client that sent the request.
++   * @param resource DPMS object to destroy.
++   */
++  void dpms_release(wl_client *client, wl_resource *resource) {
++    wl_resource_destroy(resource);
++  }
++
++  const struct org_kde_kwin_dpms_interface dpms_implementation {
++    .set = dpms_set,
++    .release = dpms_release,
++  };  ///< Requests of a DPMS object.
++
++  /**
++   * @brief Create a DPMS object and report the power state of its output, like KWin does.
++   *
++   * @param client Client that sent the request.
++   * @param manager DPMS manager.
++   * @param id Id of the new DPMS object.
++   * @param output Output the DPMS object controls.
++   */
++  void dpms_get(wl_client *client, wl_resource *manager, std::uint32_t id, wl_resource *output) {
++    auto state = static_cast<fake_output_t *>(wl_resource_get_user_data(output));
++    auto dpms = wl_resource_create(client, &org_kde_kwin_dpms_interface, wl_resource_get_version(manager), id);
++    wl_resource_set_implementation(dpms, &dpms_implementation, state, nullptr);
++    org_kde_kwin_dpms_send_supported(dpms, state->supported);
++    org_kde_kwin_dpms_send_mode(dpms, state->mode);
++    org_kde_kwin_dpms_send_done(dpms);
++  }
++
++  const struct org_kde_kwin_dpms_manager_interface dpms_manager_implementation {
++    .get = dpms_get,
++  };  ///< Requests of the DPMS manager.
++
++  /**
++   * @brief Bind an output.
++   *
++   * @param client Client binding the output.
++   * @param data Output state.
++   * @param version Version requested by the client.
++   * @param id Id of the new output object.
++   */
++  void bind_output(wl_client *client, void *data, std::uint32_t version, std::uint32_t id) {
++    auto output = wl_resource_create(client, &wl_output_interface, version, id);
++    wl_resource_set_implementation(output, nullptr, data, nullptr);
++  }
++
++  /**
++   * @brief Bind the DPMS manager.
++   *
++   * @param client Client binding the manager.
++   * @param data Unused.
++   * @param version Version requested by the client.
++   * @param id Id of the new manager object.
++   */
++  void bind_dpms_manager(wl_client *client, void *data, std::uint32_t version, std::uint32_t id) {
++    auto manager = wl_resource_create(client, &org_kde_kwin_dpms_manager_interface, version, id);
++    wl_resource_set_implementation(manager, &dpms_manager_implementation, nullptr, nullptr);
++  }
++
++  /**
++   * @brief Run wl::wake_outputs() against a compositor serving on another thread.
++   *
++   * @param outputs Outputs to serve; they record the client's requests.
++   * @param dpms Whether to serve KWin's DPMS manager.
++   */
++  void wake_outputs_on(std::vector<fake_output_t> &outputs, bool dpms) {
++    auto display = wl_display_create();
++    for (auto &output : outputs) {
++      wl_global_create(display, &wl_output_interface, 1, &output, bind_output);
++    }
++    if (dpms) {
++      wl_global_create(display, &org_kde_kwin_dpms_manager_interface, 1, nullptr, bind_dpms_manager);
++    }
++
++    auto socket = std::filesystem::temp_directory_path() / ("sunshine-test-wayland-" + std::to_string(getpid()));  // NOSONAR(cpp:S5443): safe for tests
++    if (wl_display_add_socket(display, socket.c_str())) {
++      wl_display_destroy(display);
++      FAIL() << "Couldn't listen on " << socket;
++    }
++
++    std::atomic_bool running {true};
++    std::thread compositor {[display, &running]() {
++      while (running) {
++        wl_display_flush_clients(display);
++        wl_event_loop_dispatch(wl_display_get_event_loop(display), -1);
++      }
++    }};
++
++    {
++      test_utils::env_restore_t restore {"WAYLAND_DISPLAY"};
++      lizardbyte::common::set_env("WAYLAND_DISPLAY", socket.string());
++      wl::wake_outputs();
++    }
++
++    running = false;
++    wl_display_terminate(display);
++    compositor.join();
++    wl_display_destroy(display);
++  }
++}  // namespace
++
++TEST(WaylandWakeOutputsTest, TurnsOnOutputsThatAreOff) {
++  std::vector<fake_output_t> outputs {
++    {.supported = true, .mode = ORG_KDE_KWIN_DPMS_MODE_OFF, .obeys = true},
++    {.supported = true, .mode = ORG_KDE_KWIN_DPMS_MODE_STANDBY, .obeys = true},
++    {.supported = true, .mode = ORG_KDE_KWIN_DPMS_MODE_ON, .obeys = true},
++    {.supported = false, .mode = ORG_KDE_KWIN_DPMS_MODE_OFF, .obeys = true},
++  };
++
++  wake_outputs_on(outputs, true);
++
++  const std::vector<std::uint32_t> on {ORG_KDE_KWIN_DPMS_MODE_ON};
++  EXPECT_EQ(outputs[0].requests, on);
++  EXPECT_EQ(outputs[1].requests, on);
++  EXPECT_TRUE(outputs[2].requests.empty());
++  EXPECT_TRUE(outputs[3].requests.empty());
++}
++
++TEST(WaylandWakeOutputsTest, ReportsOutputsThatStayOff) {
++  std::vector<fake_output_t> outputs {
++    {.supported = true, .mode = ORG_KDE_KWIN_DPMS_MODE_OFF, .obeys = false},
++  };
++
++  wake_outputs_on(outputs, true);
++
++  EXPECT_EQ(outputs[0].requests, std::vector<std::uint32_t> {ORG_KDE_KWIN_DPMS_MODE_ON});
++  EXPECT_TRUE(log_checker::line_contains("test_sunshine.log", "[wayland] A display stayed off"));
++}
++
++TEST(WaylandWakeOutputsTest, IgnoresCompositorsWithoutDpms) {
++  std::vector<fake_output_t> outputs {
++    {.supported = true, .mode = ORG_KDE_KWIN_DPMS_MODE_OFF, .obeys = true},
++  };
++
++  wake_outputs_on(outputs, false);
++
++  EXPECT_TRUE(outputs[0].requests.empty());
++}
++
++TEST(WaylandWakeOutputsTest, NeedsWaylandDisplay) {
++  test_utils::env_restore_t restore {"WAYLAND_DISPLAY"};
++  lizardbyte::common::unset_env("WAYLAND_DISPLAY");
++
++  wl::wake_outputs();
++
++  EXPECT_TRUE(log_checker::line_contains("test_sunshine.log", "Environment variable WAYLAND_DISPLAY has not been defined"));
++}
+ #endif

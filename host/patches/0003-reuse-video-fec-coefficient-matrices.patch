@@ -1,0 +1,234 @@
+diff --git a/src/fec_encoder_cache.h b/src/fec_encoder_cache.h
+new file mode 100644
+index 0000000..9d018a8
+--- /dev/null
++++ b/src/fec_encoder_cache.h
+@@ -0,0 +1,95 @@
++/**
++ * @file src/fec_encoder_cache.h
++ * @brief Bounded sender-owned cache of Reed-Solomon coefficient matrices.
++ */
++#pragma once
++
++#include <array>
++#include <cstddef>
++#include <memory>
++#include <rs.h>
++#include <stdexcept>
++
++namespace stream::fec {
++  /**
++   * @brief Release a cached Reed-Solomon encoder.
++   */
++  struct rs_deleter_t {
++    /** @brief Release encoder storage. @param encoder Encoder to release. */
++    void operator()(reed_solomon *encoder) const {
++      reed_solomon_release(encoder);
++    }
++  };
++
++  /**
++   * @brief Reuse up to eight coefficient matrices on one video sender thread.
++   *
++   * Entries use a small MRU index list instead of an unbounded map. Encoder use
++   * finishes before the next lookup; callers must not retain the returned pointer
++   * across another lookup. This class is intentionally not shared between threads.
++   */
++  class rs_cache_t {
++  public:
++    /**
++     * @brief Find or initialize coefficients for a validated FEC block shape.
++     * @param data_shards Number of data shards.
++     * @param parity_shards Number of parity shards.
++     * @return Encoder owned by this cache until a later lookup evicts it.
++     */
++    reed_solomon *get(int data_shards, int parity_shards) {
++      if (data_shards <= 0 || parity_shards <= 0 || data_shards > DATA_SHARDS_MAX || parity_shards > DATA_SHARDS_MAX || data_shards + parity_shards > DATA_SHARDS_MAX) {
++        throw std::invalid_argument("Invalid Reed-Solomon shard counts");
++      }
++      for (std::size_t i = 0; i < used; ++i) {
++        auto index = order[i];
++        auto &entry = entries[index];
++        if (entry.data_shards == data_shards && entry.parity_shards == parity_shards) {
++          promote(i, index);
++          return entry.encoder.get();
++        }
++      }
++      // Construct before eviction so an allocation failure leaves the cache intact.
++      std::unique_ptr<reed_solomon, rs_deleter_t> encoder {reed_solomon_new(data_shards, parity_shards)};
++      if (!encoder) {
++        throw std::bad_alloc();
++      }
++      const auto index = used < entries.size() ? used : order[used - 1];
++      if (used < entries.size()) {
++        ++used;
++      }
++      entries[index] = {data_shards, parity_shards, std::move(encoder)};
++      promote(used - 1, index);
++      return entries[index].encoder.get();
++    }
++
++    /** @brief Return the number of cached coefficient matrices. */
++    std::size_t size() const {
++      return used;
++    }
++
++  private:
++    /** @brief One immutable coefficient matrix and its dimensions. */
++    struct entry_t {
++      int data_shards = 0;  ///< Data shard count.
++      int parity_shards = 0;  ///< Parity shard count.
++      std::unique_ptr<reed_solomon, rs_deleter_t> encoder;  ///< Owned matrix.
++    };
++
++    /**
++     * @brief Move an entry to the MRU end without allocation or a wrapping clock.
++     * @param position Previous index in the MRU ordering.
++     * @param index Entry to promote.
++     */
++    void promote(std::size_t position, std::size_t index) {
++      while (position > 0) {
++        order[position] = order[position - 1];
++        --position;
++      }
++      order[0] = index;
++    }
++
++    std::array<entry_t, 8> entries;  ///< Bounded encoder storage.
++    std::array<std::size_t, 8> order {};  ///< Most recently used entry first.
++    std::size_t used = 0;  ///< Number of initialized entries.
++  };
++}  // namespace stream::fec
+diff --git a/src/stream.cpp b/src/stream.cpp
+index b1c02cf..4e8a7fd 100644
+--- a/src/stream.cpp
++++ b/src/stream.cpp
+@@ -25,6 +25,7 @@ extern "C" {
+ // local includes
+ #include "config.h"
+ #include "display_device.h"
++#include "fec_encoder_cache.h"
+ #include "globals.h"
+ #include "input.h"
+ #include "logging.h"
+@@ -847,7 +848,7 @@ namespace stream {
+       }
+     };
+ 
+-    static fec_t encode(const std::string_view &payload, size_t blocksize, size_t fecpercentage, size_t minparityshards, size_t prefixsize) {
++    static fec_t encode(rs_cache_t &cache, const std::string_view &payload, size_t blocksize, size_t fecpercentage, size_t minparityshards, size_t prefixsize) {
+       auto payload_size = payload.size();
+ 
+       auto pad = payload_size % blocksize != 0;
+@@ -907,9 +908,8 @@ namespace stream {
+         }
+ 
+         // packets = parity_shards + data_shards
+-        rs_t rs {reed_solomon_new((int) data_shards, (int) parity_shards)};
+-
+-        reed_solomon_encode(rs.get(), shards_p.begin(), (int) nr_shards, (int) blocksize);
++        auto *rs = cache.get((int) data_shards, (int) parity_shards);
++        reed_solomon_encode(rs, shards_p.begin(), (int) nr_shards, (int) blocksize);
+       }
+ 
+       return {
+@@ -1542,6 +1542,8 @@ namespace stream {
+ 
+     crypto::aes_t iv(12);
+ 
++    fec::rs_cache_t fec_encoders;
++
+     auto timer = platf::create_high_precision_timer();
+     if (!timer || !*timer) {
+       BOOST_LOG(error) << "Failed to create timer, aborting video broadcast thread";
+@@ -1711,7 +1713,7 @@ namespace stream {
+ 
+           frame_fec_latency_logger.first_point_now();
+           // If video encryption is enabled, we allocate space for the encryption header before each shard
+-          auto shards = fec::encode(current_payload, blocksize, fecPercentage, session->config.minRequiredFecPackets, session->video.cipher ? sizeof(video_packet_enc_prefix_t) : 0);
++          auto shards = fec::encode(fec_encoders, current_payload, blocksize, fecPercentage, session->config.minRequiredFecPackets, session->video.cipher ? sizeof(video_packet_enc_prefix_t) : 0);
+           frame_fec_latency_logger.second_point_now_and_log();
+ 
+           auto peer_address = session->video.peer.address();
+diff --git a/tests/unit/test_fec_encoder_cache.cpp b/tests/unit/test_fec_encoder_cache.cpp
+new file mode 100644
+index 0000000..bdf3e3c
+--- /dev/null
++++ b/tests/unit/test_fec_encoder_cache.cpp
+@@ -0,0 +1,76 @@
++/**
++ * @file tests/unit/test_fec_encoder_cache.cpp
++ * @brief Verify cached FEC coefficients remain wire-compatible and bounded.
++ */
++#include <climits>
++#include <gtest/gtest.h>
++#include <src/fec_encoder_cache.h>
++#include <vector>
++
++/** @brief Initialize the same finite-field implementation used by the host. */
++class FecEncoderCache: public testing::Test {
++protected:
++  /** @brief Initialize FEC arithmetic before constructing coefficient matrices. */
++  static void SetUpTestSuite() {
++    reed_solomon_init();
++  }
++};
++
++TEST_F(FecEncoderCache, RejectsInvalidDimensionsWithoutMutatingCache) {
++  stream::fec::rs_cache_t cache;
++  for (const auto [data, parity] : {std::pair {0, 1}, {1, 0}, {-1, 1}, {1, -1}, {255, 1}, {1, 255}, {INT_MAX, INT_MAX}}) {
++    EXPECT_THROW(cache.get(data, parity), std::invalid_argument);
++  }
++  EXPECT_EQ(cache.size(), 0);
++}
++
++TEST_F(FecEncoderCache, ReusesRecentlyUsedEntriesAndRemainsBounded) {
++  stream::fec::rs_cache_t cache;
++  auto *first = cache.get(16, 4);
++  EXPECT_EQ(first, cache.get(16, 4));
++  for (int data = 17; data < 24; ++data) {
++    cache.get(data, 4);
++  }
++  EXPECT_EQ(cache.size(), 8);
++  EXPECT_EQ(first, cache.get(16, 4));
++  cache.get(24, 4);  // Evicts 17/4, preserving the promoted 16/4 entry.
++  EXPECT_EQ(first, cache.get(16, 4));
++  EXPECT_EQ(cache.size(), 8);
++}
++
++TEST_F(FecEncoderCache, MatchesFreshParityAcrossHitsEvictionsAndDifferentPayloads) {
++  stream::fec::rs_cache_t cache;
++  for (int pass = 0; pass < 3; ++pass) {
++    for (int shape = 1; shape < 12; ++shape) {
++      const int data = shape * 16;
++      const int parity = shape * 3;
++      constexpr int bytes = 1024;
++      std::vector<unsigned char> reference((data + parity) * bytes), cached(reference.size());
++      for (int i = 0; i < data * bytes; ++i) {
++        reference[i] = static_cast<unsigned char>(i * 37 + pass * 101 + shape);
++      }
++      cached = reference;
++      std::vector<unsigned char *> a(data + parity), b(data + parity);
++      for (int i = 0; i < data + parity; ++i) {
++        a[i] = reference.data() + i * bytes;
++        b[i] = cached.data() + i * bytes;
++      }
++      std::unique_ptr<reed_solomon, stream::fec::rs_deleter_t> fresh {reed_solomon_new(data, parity)};
++      ASSERT_NE(fresh, nullptr);
++      ASSERT_EQ(reed_solomon_encode(fresh.get(), a.data(), data + parity, bytes), 0);
++      ASSERT_EQ(reed_solomon_encode(cache.get(data, parity), b.data(), data + parity, bytes), 0);
++      EXPECT_EQ(reference, cached) << shape << ": " << pass;
++      // Exercise the hit path on another payload, without rebuilding coefficients.
++      b[data][0] ^= 0x55;
++      ASSERT_EQ(reed_solomon_encode(cache.get(data, parity), b.data(), data + parity, bytes), 0);
++      EXPECT_EQ(reference, cached);
++      EXPECT_LE(cache.size(), 8);
++    }
++  }
++}
++
++TEST_F(FecEncoderCache, AcceptsMaximumValidTotalShardCount) {
++  stream::fec::rs_cache_t cache;
++  EXPECT_NE(cache.get(254, 1), nullptr);
++  EXPECT_NE(cache.get(1, 254), nullptr);
++}

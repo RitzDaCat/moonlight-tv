@@ -1,0 +1,63 @@
+{
+  "base_commit": "019b1ba661d829e334706557a3e2bdc3d2374591",
+  "moonlight_common_commit": "62e066388f1a1b133e0bee947b9a374311a3354b",
+  "patch_sha256": "2343f1a493de1c011e7c16ea86f1fb737e7a2707d98867a7445b34196a688c6c",
+  "change": "Reject invalid RTSP packet sizes before narrowing, validate final UDP geometry including encryption, and recheck in broadcaster before modulo and shard arithmetic.",
+  "configured_packet_bounds_unchanged": [
+    200,
+    65535
+  ],
+  "max_effective_packet_size": {
+    "unencrypted": 65491,
+    "encrypted": 65459,
+    "ipv4_udp_payload_limit": 65507,
+    "rtp_bytes": 16,
+    "encryption_prefix_bytes": 32
+  },
+  "focused_test": {
+    "compile_command": "c++ -std=c++23 -Wall -Wextra -Werror -pedantic -fsanitize=undefined,address -fno-omit-frame-pointer -I. -Ithird-party tests/unit/test_video_packet_size.cpp -o build-packet-regression/video-packet-size-tests $(pkg-config --cflags --libs gtest_main)",
+    "run_command": "build-packet-regression/video-packet-size-tests",
+    "compiler": "GCC 16.2.1",
+    "result": "PASS",
+    "tests": 4,
+    "coverage": [
+      "packetSize16 modulo-zero trigger",
+      "zero and negative sizes",
+      "minimum200 and normal1392/1456",
+      "trailing text and 32/64-bit narrowing/overflow",
+      "plaintext and encrypted UDP maxima",
+      "headers leaving no positive payload",
+      "compile-time size checks against pinned Moonlight headers"
+    ],
+    "format_command": "clang-format --dry-run --Werror src/video_packet_size.h tests/unit/test_video_packet_size.cpp",
+    "sanitizers": [
+      "AddressSanitizer",
+      "UndefinedBehaviorSanitizer"
+    ]
+  },
+  "full_host_build": {
+    "result": "PASS; Sunshine and full test_sunshine targets built",
+    "configure_command": "cmake -S . -B cmake-build-fixes -DBUILD_DOCS=OFF -DBUILD_TESTS=ON -DSUNSHINE_ENABLE_TRAY=OFF -DCMAKE_INSTALL_PREFIX=/usr -DSUNSHINE_ASSETS_DIR=share/sunshine -DCMAKE_CUDA_COMPILER=/opt/cuda/bin/nvcc -DSUNSHINE_SYSTEM_WAYLAND_PROTOCOLS=ON -DSUNSHINE_SYSTEM_VULKAN_HEADERS=ON -DBOOST_USE_STATIC=ON -DOPUS_USE_STATIC=OFF",
+    "build_command": "cmake --build cmake-build-fixes --target sunshine test_sunshine -j12",
+    "large_dependency_downloads": "Approved by user; Boost 1.89.0 and pinned FFmpeg v2026.905.170812",
+    "binary": "host/runtime/sunshine",
+    "sha256": "13650c5dc01fb7e23028abe85bffc5d4f9e52ad782bab95f4ddc8c855e722952",
+    "version_string": "0.0.0-019b1ba-dirty",
+    "runtime_link_check": "No missing libraries",
+    "packaged_test_result": "5 passed: four packet-size cases and all 21 named NVENC preset/codec combinations; temporary directory auto-cleaned",
+    "compatibility_patch": "0002-use-named-ffmpeg-nvenc-presets.patch",
+    "compatibility_patch_sha256": "ac41288cc7ae736b43c42975153d1c9a64bee8ca6694a4363213f34683f7e270"
+  },
+  "deployment": {
+    "installed_binary_modified": false,
+    "host_restarted": true,
+    "active_stream_changed": true,
+    "performance_changes": false,
+    "runtime_validation": "Isolated startup passed. Active service selected KMS and H264/HEVC/AV1 NVENC; authenticated TV-to-host HTTPS /serverinfo returned 200. Full game stream and latency targets await user test.",
+    "state": "Patched local host active through user-service override; packaged executable preserved.",
+    "initial_candidate": "Rolled back after numeric NVENC preset 12 was rejected by FFmpeg. Rebuilt with named p1..p7 presets and retested before final deployment.",
+    "running_pid": 171712,
+    "capabilities": "cap_sys_admin,cap_sys_nice=p"
+  },
+  "recorded_utc": "2026-10-18T06:14:58.646892+00:00"
+}

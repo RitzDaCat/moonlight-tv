@@ -46,12 +46,12 @@ int main(int argc, char *argv[])
     assert(mbedtls_ctr_drbg_random(&ctr_drbg, msg, sizeof(msg)) == 0);
 
     char sig[1024];
-    size_t siglen;
+    size_t siglen = sizeof(sig);
 
     assert(generateSignature(msg, sizeof(msg), sig, &siglen, &key, &ctr_drbg));
     assert(verifySignature_openssl(msg, sizeof(msg), sig, siglen, crtbuf));
 
-    EVP_PKEY *pkey;
+    EVP_PKEY *pkey = NULL;
     BIO *bio = BIO_new(BIO_s_mem());
     BIO_puts(bio, keybuf);
     PEM_read_bio_PrivateKey(bio, &pkey, NULL, NULL);

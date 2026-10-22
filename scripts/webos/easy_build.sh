@@ -5,6 +5,11 @@ if [ ! -f scripts/webos/easy_build.sh ]; then
   exit 1
 fi
 
+# External CMake projects inherit these on their first configuration as well.
+# Keep private checkout names out of assertions, diagnostics, and debug paths.
+export CFLAGS="${CFLAGS:-} -ffile-prefix-map=${PWD}=/usr/src/moonlight-tv"
+export CXXFLAGS="${CXXFLAGS:-} -ffile-prefix-map=${PWD}=/usr/src/moonlight-tv"
+
 CMAKE_BIN=$(which cmake)
 CPACK_BIN=$(which cpack)
 
